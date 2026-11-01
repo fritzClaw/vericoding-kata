@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "katas": {
+    "0001-first-max": {
+      "intent": {
+        "path": "intents/0001-first-max.md",
+        "sha256": "c70ea280782e2e620f57ac57ff1e889212248871bc8b5a87cc327ce05a8a7e78"
+      },
+      "files": {
+        "katas/0001-first-max/Cargo.toml": "3512b4670b437c1da4c1c78bce0bd13a6186c308638c402ed58190d4820163e7",
+        "katas/0001-first-max/src/lib.rs": "13d3d0155b08ab8fd4d9ff245a5054ce0b4bed5f4bdc0a57719f5bf642f3ad56"
+      }
+    }
+  }
+}

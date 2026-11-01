@@ -1,0 +1,77 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: spec lock + Verus + tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Cache Verus release
+        uses: actions/cache@v4
+        with:
+          path: ~/.verus
+          key: verus-${{ runner.os }}-${{ hashFiles('verus-toolchain.env') }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('verus-toolchain.env', 'Cargo.lock') }}-${{ hashFiles('katas/**') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ hashFiles('verus-toolchain.env', 'Cargo.lock') }}-
+
+      - name: Install Verus
+        run: |
+          scripts/install-verus.sh
+          scripts/install-verus.sh --print-env | sed -E 's/^export PATH="([^:]*):.*/\1/' >> "$GITHUB_PATH"
+
+      - name: Flag spec changes
+        if: github.event_name == 'pull_request'
+        run: |
+          base="origin/${{ github.base_ref }}"
+          changed="$(git diff --name-only "$base"...HEAD -- specs.lock.json intents/ || true)"
+          if [ -n "$changed" ]; then
+            echo "::warning title=Spec change::This PR changes the trusted spec or intent. It needs code-owner approval, not just a green build."
+            {
+              echo "## ⚠️ Spec change"
+              echo "This PR changes what is being proved. Review the intent and the frozen spec, not only the proof."
+              echo
+              echo '```'
+              echo "$changed"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Self-test the gatekeeper (tools/test_vc.py)
+        run: python3 -m unittest discover -s tools -v
+
+      - name: Gate (scripts/verify.sh)
+        run: scripts/verify.sh
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Katas"
+            python3 tools/vc.py status --markdown
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,4 @@
+# Must equal RUST_TOOLCHAIN in verus-toolchain.env (the toolchain Verus was built against).
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt"]

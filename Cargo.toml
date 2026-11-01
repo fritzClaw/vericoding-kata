@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = ["katas/*"]
+
+[workspace.package]
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+# Must equal VSTD_VERSION in verus-toolchain.env (checked by `tools/vc.py check`).
+vstd = "=0.0.0-2026-10-18-0147"
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)', 'cfg(verus_keep_ghost)'] }
+unsafe_code = "forbid"

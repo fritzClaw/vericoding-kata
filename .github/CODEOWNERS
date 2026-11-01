@@ -1,0 +1,18 @@
+# The trusted computing base of this repo. Anything here changes WHAT is
+# proved (intents, spec lock) or HOW it is checked (gate, toolchain, CI).
+# With branch protection "Require review from Code Owners" enabled, a green
+# build alone can never merge a change to these.
+/intents/               @fritzClaw
+/specs.lock.json        @fritzClaw
+/tools/                 @fritzClaw
+/scripts/               @fritzClaw
+/.github/               @fritzClaw
+/.claude/               @fritzClaw
+/CLAUDE.md              @fritzClaw
+/Cargo.toml             @fritzClaw
+/rust-toolchain.toml    @fritzClaw
+/verus-toolchain.env    @fritzClaw
+
+# katas/** is deliberately NOT owned: proof/implementation PRs only need CI.
+# A change to a kata's frozen spec fails `vc check` unless specs.lock.json is
+# re-locked, which pulls the PR back under code-owner review.
