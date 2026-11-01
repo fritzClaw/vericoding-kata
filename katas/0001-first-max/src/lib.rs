@@ -34,8 +34,25 @@ pub fn first_max(v: &[i64]) -> (r: usize)
         is_first_max(v@, r as int),
 {
     // <vc-code>
-    assume(false);
-    unreached()
+    let mut best: usize = 0;
+    let mut i: usize = 1;
+    while i < v.len()
+        invariant
+            1 <= i <= v.len(),
+            best < i,
+            // v[best] is a maximum of the prefix v[..i]
+            forall|j: int| 0 <= j < i ==> v[j] <= v[best as int],
+            // ... and the first one
+            forall|j: int| 0 <= j < best ==> v[j] < v[best as int],
+        decreases v.len() - i,
+    {
+        // strict `>` keeps the earliest maximum (D2)
+        if v[i] > v[best] {
+            best = i;
+        }
+        i += 1;
+    }
+    best
     // </vc-code>
 }
 
