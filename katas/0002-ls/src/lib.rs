@@ -771,84 +771,123 @@ proof fn lemma_before_order(a: Seq<u8>, b: Seq<u8>, c: Seq<u8>, reverse: bool)
     }
 }
 
+proof fn lemma_contains_add(a: Seq<Seq<u8>>, b: Seq<Seq<u8>>)
+    ensures
+        forall|n: Seq<u8>| #![trigger (a + b).contains(n)] (a + b).contains(n) <==> (a.contains(n) || b.contains(n)),
+{
+    assert forall|n: Seq<u8>| #![trigger (a + b).contains(n)] (a + b).contains(n) <==> (a.contains(n) || b.contains(n)) by {
+        if (a + b).contains(n) {
+            let k = choose|k: int| 0 <= k < (a + b).len() && (a + b)[k] == n;
+            if k < a.len() {
+                assert(a[k] == n);
+            } else {
+                assert(b[k - a.len()] == n);
+            }
+        }
+        if a.contains(n) {
+            let k = choose|k: int| 0 <= k < a.len() && a[k] == n;
+            assert((a + b)[k] == n);
+        }
+        if b.contains(n) {
+            let k = choose|k: int| 0 <= k < b.len() && b[k] == n;
+            assert((a + b)[k + a.len()] == n);
+        }
+    }
+}
+
+proof fn lemma_contains_split(s: Seq<Seq<u8>>, i: int)
+    requires
+        0 <= i <= s.len(),
+    ensures
+        s == s.subrange(0, i) + s.subrange(i, s.len() as int),
+        forall|n: Seq<u8>| #![trigger s.contains(n)]
+            s.contains(n) <==> (s.subrange(0, i).contains(n) || s.subrange(i, s.len() as int).contains(n)),
+{
+    assert(s =~= s.subrange(0, i) + s.subrange(i, s.len() as int));
+    lemma_contains_add(s.subrange(0, i), s.subrange(i, s.len() as int));
+}
+
+proof fn lemma_contains_single(x: Seq<u8>)
+    ensures
+        forall|n: Seq<u8>| #![trigger seq![x].contains(n)] seq![x].contains(n) <==> n == x,
+{
+    assert forall|n: Seq<u8>| seq![x].contains(n) <==> n == x by {
+        if n == x {
+            assert(seq![x][0] == n);
+        }
+    }
+}
+
+proof fn lemma_sorted_tail(s: Seq<Seq<u8>>, reverse: bool)
+    requires
+        strictly_sorted(s, reverse),
+        s.len() > 0,
+    ensures
+        strictly_sorted(s.subrange(1, s.len() as int), reverse),
+        forall|j: int| 1 <= j < s.len() ==> before(s[0], #[trigger] s[j], reverse),
+{
+    let t = s.subrange(1, s.len() as int);
+    assert forall|i: int, j: int| 0 <= i < j < t.len() implies before(t[i], t[j], reverse) by {
+        assert(t[i] == s[i + 1] && t[j] == s[j + 1]);
+    }
+    assert forall|j: int| 1 <= j < s.len() implies before(s[0], #[trigger] s[j], reverse) by {
+        assert(before(s[0], s[j], reverse));
+    }
+}
+
 proof fn lemma_insert_unique(x: Seq<u8>, s: Seq<Seq<u8>>, reverse: bool)
     requires
         strictly_sorted(s, reverse),
     ensures
         strictly_sorted(insert_unique(x, s, reverse), reverse),
-        forall|n: Seq<u8>| insert_unique(x, s, reverse).contains(n) <==> (n == x || s.contains(n)),
+        forall|n: Seq<u8>| #![trigger insert_unique(x, s, reverse).contains(n)]
+            insert_unique(x, s, reverse).contains(n) <==> (n == x || s.contains(n)),
     decreases s.len(),
 {
     let r = insert_unique(x, s, reverse);
+    lemma_contains_single(x);
     if s.len() == 0 {
-        assert(r =~= seq![x]);
+        assert(r == seq![x]);
     } else if x == s[0] {
-    } else if before(x, s[0], reverse) {
-        assert forall|i: int, j: int| 0 <= i < j < r.len() implies before(r[i], r[j], reverse) by {
-            if i == 0 {
-                lemma_before_order(x, s[0], s[j - 1], reverse);
-            } else {
-                assert(r[i] == s[i - 1] && r[j] == s[j - 1]);
-            }
-        }
-        assert forall|n: Seq<u8>| r.contains(n) <==> (n == x || s.contains(n)) by {
-            if s.contains(n) {
-                let k = choose|k: int| 0 <= k < s.len() && s[k] == n;
-                assert(r[k + 1] == n);
-            }
-            if n == x {
-                assert(r[0] == x);
-            }
-        }
+        assert(s.contains(s[0]));
     } else {
+        lemma_contains_split(s, 1);
         let t = s.subrange(1, s.len() as int);
-        assert forall|i: int, j: int| 0 <= i < j < t.len() implies before(t[i], t[j], reverse) by {
-            assert(t[i] == s[i + 1] && t[j] == s[j + 1]);
-        }
-        lemma_insert_unique(x, t, reverse);
-        let rt = insert_unique(x, t, reverse);
-        assert(r =~= seq![s[0]] + rt);
-        lemma_before_order(x, s[0], x, reverse);
-        assert forall|i: int, j: int| 0 <= i < j < r.len() implies before(r[i], r[j], reverse) by {
-            if i == 0 {
-                assert(r[j] == rt[j - 1]);
-                assert(rt.contains(rt[j - 1]));
-                if rt[j - 1] != x {
-                    let k = choose|k: int| 0 <= k < t.len() && t[k] == rt[j - 1];
-                    assert(s[k + 1] == t[k]);
-                }
-            } else {
-                assert(r[i] == rt[i - 1] && r[j] == rt[j - 1]);
-            }
-        }
-        assert forall|n: Seq<u8>| r.contains(n) <==> (n == x || s.contains(n)) by {
-            if r.contains(n) {
-                let k = choose|k: int| 0 <= k < r.len() && r[k] == n;
-                if k > 0 {
-                    assert(rt[k - 1] == n);
-                    if n != x {
-                        let m = choose|m: int| 0 <= m < t.len() && t[m] == n;
-                        assert(s[m + 1] == n);
+        let h = s.subrange(0, 1);
+        assert(h =~= seq![s[0]]);
+        lemma_contains_single(s[0]);
+        lemma_sorted_tail(s, reverse);
+        if before(x, s[0], reverse) {
+            assert(r == seq![x] + s);
+            lemma_contains_add(seq![x], s);
+            assert forall|i: int, j: int| 0 <= i < j < r.len() implies before(r[i], r[j], reverse) by {
+                if i == 0 {
+                    if j > 1 {
+                        lemma_before_order(x, s[0], s[j - 1], reverse);
                     }
                 } else {
-                    assert(s[0] == n);
+                    assert(r[i] == s[i - 1] && r[j] == s[j - 1]);
                 }
             }
-            if s.contains(n) {
-                let k = choose|k: int| 0 <= k < s.len() && s[k] == n;
-                if k == 0 {
-                    assert(r[0] == n);
+        } else {
+            lemma_insert_unique(x, t, reverse);
+            let rt = insert_unique(x, t, reverse);
+            assert(r == seq![s[0]] + rt);
+            lemma_contains_add(seq![s[0]], rt);
+            lemma_before_order(x, s[0], x, reverse);  // so before(s[0], x)
+            assert forall|i: int, j: int| 0 <= i < j < r.len() implies before(r[i], r[j], reverse) by {
+                if i == 0 {
+                    let y = rt[j - 1];
+                    assert(r[j] == y);
+                    assert(rt.contains(y));
+                    if y != x {
+                        assert(t.contains(y));
+                        let k = choose|k: int| 0 <= k < t.len() && t[k] == y;
+                        assert(s[k + 1] == y);
+                    }
                 } else {
-                    assert(t[k - 1] == n);
-                    assert(rt.contains(n));
-                    let m = choose|m: int| 0 <= m < rt.len() && rt[m] == n;
-                    assert(r[m + 1] == n);
+                    assert(r[i] == rt[i - 1] && r[j] == rt[j - 1]);
                 }
-            }
-            if n == x {
-                assert(rt.contains(x));
-                let m = choose|m: int| 0 <= m < rt.len() && rt[m] == x;
-                assert(r[m + 1] == x);
             }
         }
     }
@@ -858,25 +897,18 @@ proof fn lemma_insert_unique(x: Seq<u8>, s: Seq<Seq<u8>>, reverse: bool)
 proof fn lemma_sort_unique(s: Seq<Seq<u8>>, reverse: bool)
     ensures
         strictly_sorted(sort_unique(s, reverse), reverse),
-        forall|n: Seq<u8>| sort_unique(s, reverse).contains(n) <==> s.contains(n),
+        forall|n: Seq<u8>| #![trigger sort_unique(s, reverse).contains(n)] #![trigger s.contains(n)]
+            sort_unique(s, reverse).contains(n) <==> s.contains(n),
     decreases s.len(),
 {
     if s.len() > 0 {
         let p = s.subrange(0, s.len() - 1);
+        let x = s[s.len() - 1];
         lemma_sort_unique(p, reverse);
-        lemma_insert_unique(s[s.len() - 1], sort_unique(p, reverse), reverse);
-        assert forall|n: Seq<u8>| s.contains(n) <==> (n == s[s.len() - 1] || p.contains(n)) by {
-            if s.contains(n) {
-                let k = choose|k: int| 0 <= k < s.len() && s[k] == n;
-                if k < s.len() - 1 {
-                    assert(p[k] == n);
-                }
-            }
-            if p.contains(n) {
-                let k = choose|k: int| 0 <= k < p.len() && p[k] == n;
-                assert(s[k] == n);
-            }
-        }
+        lemma_insert_unique(x, sort_unique(p, reverse), reverse);
+        lemma_contains_split(s, s.len() - 1);
+        assert(s.subrange(s.len() - 1, s.len() as int) =~= seq![x]);
+        lemma_contains_single(x);
     } else {
         assert(sort_unique(s, reverse) =~= seq![]);
     }
@@ -884,7 +916,8 @@ proof fn lemma_sort_unique(s: Seq<Seq<u8>>, reverse: bool)
 
 proof fn lemma_shown_entries(es: Seq<Seq<u8>>, all: bool)
     ensures
-        forall|n: Seq<u8>| shown_entries(es, all).contains(n) <==> (es.contains(n) && shown(n, all)),
+        forall|n: Seq<u8>| #![trigger shown_entries(es, all).contains(n)] #![trigger es.contains(n)]
+            shown_entries(es, all).contains(n) <==> (es.contains(n) && shown(n, all)),
     decreases es.len(),
 {
     if es.len() > 0 {
@@ -892,30 +925,11 @@ proof fn lemma_shown_entries(es: Seq<Seq<u8>>, all: bool)
         lemma_shown_entries(t, all);
         let head: Seq<Seq<u8>> = if shown(es[0], all) { seq![es[0]] } else { seq![] };
         assert(shown_entries(es, all) == head + shown_entries(t, all));
-        assert forall|n: Seq<u8>| shown_entries(es, all).contains(n) <==> (es.contains(n) && shown(n, all)) by {
-            let r = shown_entries(es, all);
-            let rt = shown_entries(t, all);
-            if r.contains(n) {
-                let k = choose|k: int| 0 <= k < r.len() && r[k] == n;
-                if k < head.len() {
-                    assert(es[0] == n);
-                } else {
-                    assert(rt[k - head.len()] == n);
-                    let m = choose|m: int| 0 <= m < t.len() && t[m] == n;
-                    assert(es[m + 1] == n);
-                }
-            }
-            if es.contains(n) && shown(n, all) {
-                let k = choose|k: int| 0 <= k < es.len() && es[k] == n;
-                if k == 0 {
-                    assert(r[0] == n);
-                } else {
-                    assert(t[k - 1] == n);
-                    let m = choose|m: int| 0 <= m < rt.len() && rt[m] == n;
-                    assert(r[m + head.len()] == n);
-                }
-            }
-        }
+        lemma_contains_add(head, shown_entries(t, all));
+        lemma_contains_single(es[0]);
+        lemma_contains_split(es, 1);
+        assert(es.subrange(0, 1) =~= seq![es[0]]);
+        assert forall|n: Seq<u8>| !Seq::<Seq<u8>>::empty().contains(n) by {}
     } else {
         assert(shown_entries(es, all) =~= seq![]);
     }
@@ -926,7 +940,7 @@ proof fn lemma_shown_entries(es: Seq<Seq<u8>>, all: bool)
 proof fn spec_p3_faithful_listing(es: Seq<Seq<u8>>, all: bool, reverse: bool)
     ensures
         strictly_sorted(sort_unique(listed_names(es, all), reverse), reverse),
-        forall|n: Seq<u8>|
+        forall|n: Seq<u8>| #![trigger sort_unique(listed_names(es, all), reverse).contains(n)]
             sort_unique(listed_names(es, all), reverse).contains(n) <==> ((es.contains(n) && shown(n, all)) || (
             all && (n == dot() || n == dotdot()))),
 {
@@ -1029,13 +1043,13 @@ pub open spec fn reversed<T>(s: Seq<T>) -> Seq<T> {
 proof fn lemma_escape_all_index(names: Seq<Seq<u8>>)
     ensures
         escape_all(names).len() == names.len(),
-        forall|i: int| 0 <= i < names.len() ==> escape_all(names)[i] == escape(names[i]),
+        forall|i: int| 0 <= i < names.len() ==> #[trigger] escape_all(names)[i] == escape(names[i]),
     decreases names.len(),
 {
     if names.len() > 0 {
         let t = names.subrange(1, names.len() as int);
         lemma_escape_all_index(t);
-        assert forall|i: int| 0 <= i < names.len() implies escape_all(names)[i] == escape(names[i]) by {
+        assert forall|i: int| 0 <= i < names.len() implies #[trigger] escape_all(names)[i] == escape(names[i]) by {
             if i > 0 {
                 assert(t[i - 1] == names[i]);
             }
@@ -1063,8 +1077,11 @@ proof fn spec_p4_reverse_is_reverse(es: Seq<Seq<u8>>, all: bool)
         if rup.contains(n) {
             let k = choose|k: int| 0 <= k < rup.len() && rup[k] == n;
             assert(up[up.len() - 1 - k] == n);
+            assert(up.contains(n));
+            assert(l.contains(n));
         }
         if down.contains(n) {
+            assert(l.contains(n));
             assert(up.contains(n));
             let k = choose|k: int| 0 <= k < up.len() && up[k] == n;
             assert(rup[up.len() - 1 - k] == n);
