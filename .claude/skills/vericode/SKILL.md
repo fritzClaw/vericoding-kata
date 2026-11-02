@@ -13,6 +13,16 @@ human already approved. You may edit only:
 // <vc-code>    ... // </vc-code>      the body of a spec'd function
 ```
 
+and, for katas with a binary, the trusted shell:
+
+```
+// <vc-shell>   ... // </vc-shell>     src/main.rs only: argv, syscalls, printing
+```
+
+The shell is **not verified**. Keep it a thin adapter: build the core's input
+from the OS, call the verified core, write its output. No logic that the
+intent assigns to the core. Call it out in the PR description for review.
+
 Everything else in `katas/NNNN-*/` — and all of `intents/`, `specs.lock.json`,
 `tools/`, `scripts/`, CI — is off limits. `tools/vc.py check` hashes it.
 

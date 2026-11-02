@@ -193,6 +193,45 @@ class VcCheckTest(unittest.TestCase):
         self.add_helper("mod sneaky;")
         self.assertRejected("new modules")
 
+    # -- files outside src/ and trusted shell -----------------------------
+    def test_build_script_rejected(self):
+        (self.tmp / KATA / "build.rs").write_text("fn main() {}\n")
+        self.assertRejected("build scripts")
+
+    def test_unlocked_test_file(self):
+        (self.tmp / KATA / "tests").mkdir()
+        (self.tmp / KATA / "tests/t.rs").write_text("#[test] fn t() {}\n")
+        self.assertRejected("not covered by the spec lock")
+
+    def test_shell_region_only_in_main(self):
+        self.add_helper("// <vc-shell>\n// </vc-shell>")
+        self.assertRejected("nested")
+        self.edit(LIB, r"^// <vc-shell>\n// </vc-shell>\n", "")
+        self.edit(LIB, r"^proof fn spec_examples", "// <vc-shell>\n// </vc-shell>\nproof fn spec_examples")
+        self.assertRejected("only allowed in src/main.rs")
+
+    def _with_shell(self):
+        (self.tmp / KATA / "src/main.rs").write_text(
+            "fn main() {\n    // <vc-shell>\n    // </vc-shell>\n}\n")
+        self.vc("lock", NAME)
+
+    def test_shell_region_editable(self):
+        self._with_shell()
+        self.edit(f"{KATA}/src/main.rs", r"^    // <vc-shell>$",
+                  '    // <vc-shell>\n    let args: Vec<String> = std::env::args().collect();\n    println!("{}", args.len());')
+        r = self.check()
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_shell_region_scanned(self):
+        self._with_shell()
+        self.edit(f"{KATA}/src/main.rs", r"^    // <vc-shell>$", "    // <vc-shell>\n    unsafe { }")
+        self.assertRejected("unsafe")
+
+    def test_shell_skeleton_locked(self):
+        self._with_shell()
+        self.edit(f"{KATA}/src/main.rs", r"^fn main\(\) \{$", "fn main() {\n    sneaky();")
+        self.assertRejected("frozen spec")
+
     def test_include(self):
         self.add_helper('include!("x.rs");')
         self.assertRejected("including files")

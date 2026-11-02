@@ -8,10 +8,14 @@ enforces that:
 
   * Each kata source file has editable regions:
         // <vc-helpers> ... // </vc-helpers>   lemmas, helper fns, ghost code
-        // <vc-code>    ... // </vc-code>      function bodies
+        // <vc-code>    ... // </vc-code>      function bodies (verified)
+        // <vc-shell>   ... // </vc-shell>     TRUSTED, unverified I/O glue;
+                                               only in src/main.rs, needs
+                                               human review
     Everything else is the frozen spec. Its SHA-256 (with region contents
     removed), the kata Cargo.toml, and the intent document are pinned in
-    specs.lock.json.
+    specs.lock.json. Every .rs file of a kata (src/ and tests/) is locked and
+    scanned; any other file (build.rs, ...) is rejected.
   * Escape hatches that make Verus trust instead of check (assume, admit,
     external_body, axioms, ...) are rejected everywhere, except the canonical
     pending stub `assume(false); unreached()` in a <vc-code> region.
@@ -39,8 +43,8 @@ INTENTS = ROOT / "intents"
 LOCK = ROOT / "specs.lock.json"
 TOOLCHAIN_ENV = ROOT / "verus-toolchain.env"
 
-REGION_OPEN = re.compile(r"^\s*//\s*<vc-(helpers|code)>\s*$")
-REGION_CLOSE = re.compile(r"^\s*//\s*</vc-(helpers|code)>\s*$")
+REGION_OPEN = re.compile(r"^\s*//\s*<vc-(helpers|code|shell)>\s*$")
+REGION_CLOSE = re.compile(r"^\s*//\s*</vc-(helpers|code|shell)>\s*$")
 KATA_NAME = re.compile(r"^\d{4}-[a-z0-9]+(-[a-z0-9]+)*$")
 STUB = "assume(false);\nunreached()"
 
@@ -182,8 +186,12 @@ class Kata:
     def manifest(self) -> Path:
         return self.dir / "Cargo.toml"
 
+    def files(self) -> list[Path]:
+        return sorted(p for p in self.dir.rglob("*")
+                      if p.is_file() and "target" not in p.relative_to(self.dir).parts)
+
     def sources(self) -> list[Path]:
-        return sorted((self.dir / "src").rglob("*.rs"))
+        return [p for p in self.files() if p.suffix == ".rs"]
 
     def crate(self) -> str:
         return tomllib.loads(self.manifest.read_text())["package"]["name"]
@@ -247,7 +255,10 @@ def scan(src: Source) -> list[str]:
                     problems.append(f"{rel(src.path)}:{no}: forbidden in {where}: {why}\n    {text.strip()}")
 
     run(src.frozen, FORBIDDEN_EVERYWHERE, "spec")
+    is_main = src.path.parent.name == "src" and src.path.name == "main.rs"
     for r in src.regions:
+        if r.kind == "shell" and not is_main:
+            problems.append(f"{rel(src.path)}:{r.start}: <vc-shell> is only allowed in src/main.rs")
         if r.kind == "code" and r.body == STUB:
             continue  # canonical pending stub
         lines = [(r.start + 1 + i, l) for i, l in enumerate(r.lines)]
@@ -266,6 +277,13 @@ def check_kata(k: Kata, lock: dict) -> list[str]:
     if manifest.get("package", {}).get("metadata", {}).get("verus", {}).get("verify") is not True:
         problems.append(f"{rel(k.manifest)}: [package.metadata.verus] verify = true is required")
 
+    for f in k.files():
+        parts = f.relative_to(k.dir).parts
+        allowed = parts == ("Cargo.toml",) or (
+            parts[0] in ("src", "tests") and f.suffix == ".rs")
+        if not allowed:
+            problems.append(f"{rel(f)}: only Cargo.toml, src/**/*.rs and tests/**/*.rs may live in a kata "
+                            "(build scripts and other files would escape the spec lock)")
     sources = k.sources()
     if not sources:
         problems.append(f"katas/{k.name}: no Rust sources")

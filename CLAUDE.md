@@ -31,7 +31,10 @@ proof together, and never lock a spec the human has not approved.
    the canonical pending stub `assume(false); unreached()`.
 3. **A failing proof is information, not an obstacle.** If the spec looks
    wrong or unprovable, stop and report a counterexample. Don't work around it.
-4. **Done means** `scripts/verify.sh` is green: `vc check` + Verus with
+4. **`// <vc-shell>` (only in `src/main.rs`) is trusted, unverified code.**
+   It may only translate between the OS and the verified core: no sorting,
+   filtering or formatting logic. Flag it for human review.
+5. **Done means** `scripts/verify.sh` is green: `vc check` + Verus with
    `--no-cheating` + `cargo test`.
 
 ## Commands

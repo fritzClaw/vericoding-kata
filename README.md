@@ -32,6 +32,7 @@ spec is worthless. So this pipeline is built around one invariant:
 | 1. Intent | `intents/NNNN-name.md` (from `intents/TEMPLATE.md`) | human + agent via **grill-me** | human | code-owner review |
 | 2. Spec | everything in `katas/NNNN-name/` **outside** `<vc-*>` regions: spec fns, contracts, spec tests | agent (`spec-from-intent` skill) | human, then `tools/vc.py lock` | code-owner review (lock changes) |
 | 3. Vericode | `// <vc-helpers>` and `// <vc-code>` regions | agent (`vericode` skill) | **Verus**, via CI | green CI only |
+| 3b. Shell (optional) | `// <vc-shell>` region in `src/main.rs`: trusted, unverified I/O glue | agent (`vericode` skill) | **human review** of the PR | review |
 
 ### 1. Intent: grill-me output, made checkable
 
@@ -79,13 +80,20 @@ intent document into `specs.lock.json`.
 The agent fills the regions until `scripts/verify.sh` is green. It may add
 lemmas and helper fns in `<vc-helpers>`, but cannot touch anything else.
 
+Programs that touch the OS (files, argv, stdout) keep all logic in a
+verified pure core and put the syscalls in a `// <vc-shell>` region of
+`src/main.rs`. Verus doesn't check that code, so it must stay a thin adapter
+with no logic, and a human reviews it. Its surrounding skeleton is locked
+like any spec.
+
 ### The gate: `scripts/verify.sh`
 
 1. `tools/vc.py check`
    - the frozen spec, kata manifest, and intent match `specs.lock.json`
      (changed intent ⇒ spec must be re-reviewed);
-   - no new unlocked source files; every kata has `verify = true`; the
-     workspace includes every kata;
+   - every `.rs` file of a kata (`src/` and `tests/`) is locked; no other
+     files (e.g. `build.rs`) may exist in a kata; every kata has
+     `verify = true`; the workspace includes every kata;
    - no escape hatches anywhere (`assume`, `admit`, `external*`,
      `assume_specification`, `axiom`, `exec_allows_no_decreases_clause`,
      `assume_termination`, `unsafe`, …), and inside regions also no `cfg`,
