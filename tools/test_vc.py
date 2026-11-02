@@ -1,8 +1,10 @@
 """Regression tests for tools/vc.py: every way to cheat the gate must fail.
 
 Run: python3 -m unittest discover -s tools
-Each test copies the repo's trusted files into a temp dir, applies one
-tampering, and asserts `vc.py check` rejects it with the expected message.
+Each test builds a throwaway repo (the real tools + toolchain pins, plus a
+synthetic fixture kata, locked), applies one tampering, and asserts
+`vc.py check` rejects it with the expected message. Independent of the real
+katas, so they can be added, implemented or removed freely.
 """
 import re
 import shutil
@@ -13,24 +15,74 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-COPY = ["tools", "katas", "intents", "Cargo.toml", "rust-toolchain.toml",
-        "verus-toolchain.env", "specs.lock.json"]
-KATA = "katas/0001-first-max"
+COPY = ["tools", "intents/TEMPLATE.md", "Cargo.toml", "rust-toolchain.toml",
+        "verus-toolchain.env"]
+NAME = "0999-fixture"
+KATA = f"katas/{NAME}"
 LIB = f"{KATA}/src/lib.rs"
+INTENT = f"intents/{NAME}.md"
+
+# One pending fn (canonical stub) and one implemented fn.
+FIXTURE_LIB = """\
+use vstd::prelude::*;
+
+verus! {
+
+pub open spec fn is_id(x: u8, r: u8) -> bool { r == x }
+
+// <vc-helpers>
+// </vc-helpers>
+
+pub fn pending(x: u8) -> (r: u8)
+    ensures
+        is_id(x, r),
+{
+    // <vc-code>
+    assume(false);
+    unreached()
+    // </vc-code>
+}
+
+pub fn implemented(x: u8) -> (r: u8)
+    ensures
+        is_id(x, r),
+{
+    // <vc-code>
+    x
+    // </vc-code>
+}
+
+proof fn spec_examples() {
+    assert(is_id(1, 1));
+}
+
+} // verus!
+"""
 
 
 class VcCheckTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         for name in COPY:
-            src = ROOT / name
+            src, dst = ROOT / name, self.tmp / name
+            dst.parent.mkdir(parents=True, exist_ok=True)
             if src.is_dir():
-                shutil.copytree(src, self.tmp / name, ignore=shutil.ignore_patterns("target"))
+                shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__"))
             else:
-                shutil.copy(src, self.tmp / name)
+                shutil.copy(src, dst)
+        self.vc("new", NAME)
+        (self.tmp / LIB).write_text(FIXTURE_LIB)
+        (self.tmp / INTENT).write_text("# fixture intent\n")
+        self.vc("lock", NAME)
 
     def tearDown(self):
         shutil.rmtree(self.tmp)
+
+    def vc(self, *args):
+        r = subprocess.run([sys.executable, "-I", "tools/vc.py", *args],
+                           cwd=self.tmp, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, f"vc {' '.join(args)} failed:\n{r.stderr}")
+        return r
 
     def check(self):
         return subprocess.run([sys.executable, "-I", "tools/vc.py", "check"],
@@ -69,7 +121,7 @@ class VcCheckTest(unittest.TestCase):
         self.assertRejected("frozen spec")
 
     def test_changed_intent(self):
-        (self.tmp / "intents/0001-first-max.md").write_text("anything goes\n")
+        (self.tmp / INTENT).write_text("anything goes\n")
         self.assertRejected("intent changed")
 
     def test_verification_disabled(self):
@@ -89,7 +141,7 @@ class VcCheckTest(unittest.TestCase):
         self.assertRejected("workspace vstd")
 
     def test_unclosed_region(self):
-        self.edit(LIB, r"^    // </vc-code>$", "")
+        self.edit(LIB, r"^    // </vc-code>\n\}\n\nproof fn", "}\n\nproof fn")
         self.assertRejected("never closed")
 
     # -- escape hatches ---------------------------------------------------
