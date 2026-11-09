@@ -490,6 +490,747 @@ pub open spec fn ls(req: RequestS) -> ResponseS {
 }
 
 // <vc-helpers>
+
+// ---- views ------------------------------------------------------------------
+
+pub open spec fn ops_view(ops: &Vec<Operand>) -> Seq<OperandS> {
+    Seq::new(ops@.len(), |i: int| ops@[i]@)
+}
+
+pub open spec fn ops_at(o: Seq<OperandS>, idx: Seq<usize>) -> Seq<OperandS> {
+    Seq::new(idx.len(), |i: int| o[idx[i] as int])
+}
+
+pub open spec fn idx_ok(idx: Seq<usize>, n: nat) -> bool {
+    forall|i: int| 0 <= i < idx.len() ==> (#[trigger] idx[i]) < n
+}
+
+// ---- bytes ------------------------------------------------------------------
+
+fn copy_bytes(v: &Vec<u8>) -> (r: Vec<u8>)
+    ensures
+        r@ == v@,
+{
+    let mut r: Vec<u8> = Vec::new();
+    let mut i: usize = 0;
+    while i < v.len()
+        invariant
+            i <= v.len(),
+            r@ == v@.subrange(0, i as int),
+        decreases v.len() - i,
+    {
+        r.push(v[i]);
+        assert(v@.subrange(0, i + 1) =~= v@.subrange(0, i as int).push(v@[i as int]));
+        i += 1;
+    }
+    assert(v@.subrange(0, v@.len() as int) =~= v@);
+    r
+}
+
+fn append_bytes(out: &mut Vec<u8>, v: &Vec<u8>)
+    ensures
+        final(out)@ == old(out)@ + v@,
+{
+    let ghost o = out@;
+    let mut i: usize = 0;
+    while i < v.len()
+        invariant
+            i <= v.len(),
+            out@ == o + v@.subrange(0, i as int),
+        decreases v.len() - i,
+    {
+        out.push(v[i]);
+        assert(o + v@.subrange(0, i + 1) =~= (o + v@.subrange(0, i as int)).push(v@[i as int]));
+        i += 1;
+    }
+    assert(v@.subrange(0, v@.len() as int) =~= v@);
+}
+
+fn bytes_eq(a: &Vec<u8>, b: &Vec<u8>) -> (r: bool)
+    ensures
+        r == (a@ == b@),
+{
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i: usize = 0;
+    while i < a.len()
+        invariant
+            a.len() == b.len(),
+            i <= a.len(),
+            forall|j: int| 0 <= j < i ==> a@[j] == b@[j],
+        decreases a.len() - i,
+    {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    assert(a@ =~= b@);
+    true
+}
+
+proof fn lemma_lex_step(a: Seq<u8>, b: Seq<u8>, i: int)
+    requires
+        0 <= i < a.len(),
+        i < b.len(),
+        a[i] == b[i],
+    ensures
+        lex_lt(a.subrange(i, a.len() as int), b.subrange(i, b.len() as int)) == lex_lt(
+            a.subrange(i + 1, a.len() as int),
+            b.subrange(i + 1, b.len() as int),
+        ),
+{
+    let sa = a.subrange(i, a.len() as int);
+    let sb = b.subrange(i, b.len() as int);
+    assert(sa.subrange(1, sa.len() as int) =~= a.subrange(i + 1, a.len() as int));
+    assert(sb.subrange(1, sb.len() as int) =~= b.subrange(i + 1, b.len() as int));
+    assert(sa[0] == a[i] && sb[0] == b[i]);
+}
+
+fn lex_lt_exec(a: &Vec<u8>, b: &Vec<u8>) -> (r: bool)
+    ensures
+        r == lex_lt(a@, b@),
+{
+    let mut i: usize = 0;
+    assert(a@.subrange(0, a@.len() as int) =~= a@);
+    assert(b@.subrange(0, b@.len() as int) =~= b@);
+    while i < a.len() && i < b.len() && a[i] == b[i]
+        invariant
+            i <= a.len(),
+            i <= b.len(),
+            lex_lt(a@, b@) == lex_lt(
+                a@.subrange(i as int, a@.len() as int),
+                b@.subrange(i as int, b@.len() as int),
+            ),
+        decreases a.len() - i,
+    {
+        proof {
+            lemma_lex_step(a@, b@, i as int);
+        }
+        i += 1;
+    }
+    let ghost sa = a@.subrange(i as int, a@.len() as int);
+    let ghost sb = b@.subrange(i as int, b@.len() as int);
+    if i == b.len() {
+        assert(sb.len() == 0);
+        false
+    } else if i == a.len() {
+        assert(sa.len() == 0 && sb.len() > 0);
+        true
+    } else {
+        assert(sa[0] == a@[i as int] && sb[0] == b@[i as int]);
+        a[i] < b[i]
+    }
+}
+
+fn before_exec(a: &Vec<u8>, b: &Vec<u8>, reverse: bool) -> (r: bool)
+    ensures
+        r == before(a@, b@, reverse),
+{
+    if reverse {
+        lex_lt_exec(b, a)
+    } else {
+        lex_lt_exec(a, b)
+    }
+}
+
+// ---- escaping (D12) ---------------------------------------------------------
+
+fn hex_digit_exec(d: u8) -> (r: u8)
+    requires
+        d < 16,
+    ensures
+        r == hex_digit(d),
+{
+    if d < 10 {
+        48 + d
+    } else {
+        87 + d
+    }
+}
+
+fn push_escape_byte(out: &mut Vec<u8>, b: u8)
+    ensures
+        final(out)@ == old(out)@ + escape_byte(b),
+{
+    let ghost o = out@;
+    if b == 92 {
+        out.push(92);
+        out.push(92);
+    } else if b == 10 {
+        out.push(92);
+        out.push(110);
+    } else if b == 9 {
+        out.push(92);
+        out.push(116);
+    } else if 32 <= b && b <= 126 {
+        out.push(b);
+    } else {
+        out.push(92);
+        out.push(120);
+        out.push(hex_digit_exec(b / 16));
+        out.push(hex_digit_exec(b % 16));
+    }
+    assert(out@ =~= o + escape_byte(b));
+}
+
+fn escape_exec(s: &Vec<u8>) -> (r: Vec<u8>)
+    ensures
+        r@ == escape(s@),
+{
+    let mut out: Vec<u8> = Vec::new();
+    let mut i: usize = 0;
+    assert(s@.subrange(0, s@.len() as int) =~= s@);
+    assert(out@ + escape(s@) =~= escape(s@));
+    while i < s.len()
+        invariant
+            i <= s.len(),
+            out@ + escape(s@.subrange(i as int, s@.len() as int)) == escape(s@),
+        decreases s.len() - i,
+    {
+        let ghost t = s@.subrange(i as int, s@.len() as int);
+        let ghost rest = s@.subrange(i + 1, s@.len() as int);
+        assert(t.subrange(1, t.len() as int) =~= rest);
+        assert(t[0] == s@[i as int]);
+        assert(escape(t) == escape_byte(s@[i as int]) + escape(rest));
+        let ghost before_out = out@;
+        push_escape_byte(&mut out, s[i]);
+        assert(out@ + escape(rest) =~= before_out + escape(t));
+        i += 1;
+    }
+    assert(s@.subrange(s@.len() as int, s@.len() as int) =~= Seq::<u8>::empty());
+    assert(out@ + escape(Seq::<u8>::empty()) =~= out@);
+    out
+}
+
+// ---- directory listings (D5, D10) -------------------------------------------
+
+fn shown_exec(n: &Vec<u8>, all: bool) -> (r: bool)
+    ensures
+        r == shown(n@, all),
+{
+    if n.len() == 0 {
+        return false;
+    }
+    if n.len() == 1 && n[0] == 46 {
+        assert(n@ =~= dot());
+        return false;
+    }
+    if n.len() == 2 && n[0] == 46 && n[1] == 46 {
+        assert(n@ =~= dotdot());
+        return false;
+    }
+    assert(n@ != dot()) by {
+        if n@ == dot() {
+            assert(n@.len() == 1 && n@[0] == 46);
+        }
+    }
+    assert(n@ != dotdot()) by {
+        if n@ == dotdot() {
+            assert(n@.len() == 2 && n@[0] == 46 && n@[1] == 46);
+        }
+    }
+    all || n[0] != 46
+}
+
+fn dot_exec() -> (r: Vec<u8>)
+    ensures
+        r@ == dot(),
+{
+    let mut r = Vec::new();
+    r.push(46u8);
+    assert(r@ =~= dot());
+    r
+}
+
+fn dotdot_exec() -> (r: Vec<u8>)
+    ensures
+        r@ == dotdot(),
+{
+    let mut r = Vec::new();
+    r.push(46u8);
+    r.push(46u8);
+    assert(r@ =~= dotdot());
+    r
+}
+
+fn listed_exec(es: &Vec<Vec<u8>>, all: bool) -> (r: Vec<Vec<u8>>)
+    ensures
+        lines_view(r@) == listed_names(lines_view(es@), all),
+{
+    let ghost e = lines_view(es@);
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut i: usize = 0;
+    assert(e.subrange(0, e.len() as int) =~= e);
+    assert(lines_view(out@) + shown_entries(e, all) =~= shown_entries(e, all));
+    while i < es.len()
+        invariant
+            i <= es.len(),
+            e == lines_view(es@),
+            lines_view(out@) + shown_entries(e.subrange(i as int, e.len() as int), all) == shown_entries(e, all),
+        decreases es.len() - i,
+    {
+        let ghost t = e.subrange(i as int, e.len() as int);
+        let ghost rest = e.subrange(i + 1, e.len() as int);
+        assert(t.subrange(1, t.len() as int) =~= rest);
+        assert(t[0] == es@[i as int]@);
+        let ghost before_out = lines_view(out@);
+        if shown_exec(&es[i], all) {
+            out.push(copy_bytes(&es[i]));
+            assert(lines_view(out@) =~= before_out + seq![t[0]]);
+            assert(shown_entries(t, all) == seq![t[0]] + shown_entries(rest, all));
+            assert(lines_view(out@) + shown_entries(rest, all) =~= before_out + shown_entries(t, all));
+        } else {
+            assert(shown_entries(t, all) == Seq::<Seq<u8>>::empty() + shown_entries(rest, all));
+            assert(shown_entries(t, all) =~= shown_entries(rest, all));
+        }
+        i += 1;
+    }
+    assert(e.subrange(e.len() as int, e.len() as int) =~= Seq::<Seq<u8>>::empty());
+    assert(lines_view(out@) =~= shown_entries(e, all));
+    if all {
+        let ghost before_out = lines_view(out@);
+        out.push(dot_exec());
+        out.push(dotdot_exec());
+        assert(lines_view(out@) =~= before_out + seq![dot(), dotdot()]);
+    }
+    out
+}
+
+// ---- sorting names (D4, D7, D10) --------------------------------------------
+
+proof fn lemma_insert_unique_skip(x: Seq<u8>, s: Seq<Seq<u8>>, k: int, reverse: bool)
+    requires
+        0 <= k <= s.len(),
+        forall|j: int| 0 <= j < k ==> x != #[trigger] s[j] && !before(x, s[j], reverse),
+    ensures
+        insert_unique(x, s, reverse) == s.subrange(0, k) + insert_unique(x, s.subrange(k, s.len() as int), reverse),
+    decreases k,
+{
+    if k == 0 {
+        assert(s.subrange(0, s.len() as int) =~= s);
+        assert(s.subrange(0, 0) + insert_unique(x, s, reverse) =~= insert_unique(x, s, reverse));
+    } else {
+        let t = s.subrange(1, s.len() as int);
+        assert(x != s[0] && !before(x, s[0], reverse));
+        assert forall|j: int| 0 <= j < k - 1 implies x != #[trigger] t[j] && !before(x, t[j], reverse) by {
+            assert(t[j] == s[j + 1]);
+        }
+        lemma_insert_unique_skip(x, t, k - 1, reverse);
+        assert(t.subrange(k - 1, t.len() as int) =~= s.subrange(k, s.len() as int));
+        assert(seq![s[0]] + t.subrange(0, k - 1) =~= s.subrange(0, k));
+        assert(insert_unique(x, s, reverse) == seq![s[0]] + insert_unique(x, t, reverse));
+        assert(seq![s[0]] + (t.subrange(0, k - 1) + insert_unique(x, s.subrange(k, s.len() as int), reverse))
+            =~= s.subrange(0, k) + insert_unique(x, s.subrange(k, s.len() as int), reverse));
+    }
+}
+
+fn insert_unique_exec(s: &mut Vec<Vec<u8>>, x: Vec<u8>, reverse: bool)
+    ensures
+        lines_view(final(s)@) == insert_unique(x@, lines_view(old(s)@), reverse),
+{
+    let ghost sv = lines_view(s@);
+    let mut j: usize = 0;
+    while j < s.len()
+        invariant
+            j <= s.len(),
+            sv == lines_view(s@),
+            sv == lines_view(old(s)@),
+            forall|i: int| 0 <= i < j ==> x@ != #[trigger] sv[i] && !before(x@, sv[i], reverse),
+        decreases s.len() - j,
+    {
+        assert(sv[j as int] == s@[j as int]@);
+        if bytes_eq(&x, &s[j]) {
+            proof {
+                lemma_insert_unique_skip(x@, sv, j as int, reverse);
+                let t = sv.subrange(j as int, sv.len() as int);
+                assert(t[0] == sv[j as int]);
+                assert(insert_unique(x@, t, reverse) == t);
+                assert(sv.subrange(0, j as int) + t =~= sv);
+            }
+            return;
+        }
+        if before_exec(&x, &s[j], reverse) {
+            proof {
+                lemma_insert_unique_skip(x@, sv, j as int, reverse);
+                let t = sv.subrange(j as int, sv.len() as int);
+                assert(t[0] == sv[j as int]);
+                assert(insert_unique(x@, t, reverse) == seq![x@] + t);
+            }
+            let ghost xv = x@;
+            s.insert(j, x);
+            assert(lines_view(s@) =~= sv.subrange(0, j as int) + (seq![xv] + sv.subrange(j as int, sv.len() as int)));
+            return;
+        }
+        j += 1;
+    }
+    proof {
+        lemma_insert_unique_skip(x@, sv, j as int, reverse);
+        assert(sv.subrange(j as int, sv.len() as int) =~= Seq::<Seq<u8>>::empty());
+        assert(sv.subrange(0, j as int) =~= sv);
+    }
+    let ghost xv = x@;
+    s.push(x);
+    assert(lines_view(s@) =~= sv + seq![xv]);
+}
+
+fn sort_unique_exec(v: &Vec<Vec<u8>>, reverse: bool) -> (r: Vec<Vec<u8>>)
+    ensures
+        lines_view(r@) == sort_unique(lines_view(v@), reverse),
+{
+    let ghost l = lines_view(v@);
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut i: usize = 0;
+    assert(l.subrange(0, 0) =~= Seq::<Seq<u8>>::empty());
+    assert(lines_view(out@) =~= Seq::<Seq<u8>>::empty());
+    while i < v.len()
+        invariant
+            i <= v.len(),
+            l == lines_view(v@),
+            lines_view(out@) == sort_unique(l.subrange(0, i as int), reverse),
+        decreases v.len() - i,
+    {
+        let ghost p = l.subrange(0, i + 1);
+        assert(p.subrange(0, i as int) =~= l.subrange(0, i as int));
+        assert(p[i as int] == v@[i as int]@);
+        insert_unique_exec(&mut out, copy_bytes(&v[i]), reverse);
+        i += 1;
+    }
+    assert(l.subrange(0, l.len() as int) =~= l);
+    out
+}
+
+// ---- operands (D9, D13, D14, D17, D18) --------------------------------------
+
+proof fn lemma_insert_op_skip(x: OperandS, s: Seq<OperandS>, k: int, reverse: bool)
+    requires
+        0 <= k <= s.len(),
+        forall|j: int| 0 <= j < k ==> !before(x.name, (#[trigger] s[j]).name, reverse),
+    ensures
+        insert_op(x, s, reverse) == s.subrange(0, k) + insert_op(x, s.subrange(k, s.len() as int), reverse),
+    decreases k,
+{
+    if k == 0 {
+        assert(s.subrange(0, s.len() as int) =~= s);
+        assert(s.subrange(0, 0) + insert_op(x, s, reverse) =~= insert_op(x, s, reverse));
+    } else {
+        let t = s.subrange(1, s.len() as int);
+        assert(!before(x.name, s[0].name, reverse));
+        assert forall|j: int| 0 <= j < k - 1 implies !before(x.name, (#[trigger] t[j]).name, reverse) by {
+            assert(t[j] == s[j + 1]);
+        }
+        lemma_insert_op_skip(x, t, k - 1, reverse);
+        assert(t.subrange(k - 1, t.len() as int) =~= s.subrange(k, s.len() as int));
+        assert(seq![s[0]] + t.subrange(0, k - 1) =~= s.subrange(0, k));
+        assert(insert_op(x, s, reverse) == seq![s[0]] + insert_op(x, t, reverse));
+        assert(seq![s[0]] + (t.subrange(0, k - 1) + insert_op(x, s.subrange(k, s.len() as int), reverse))
+            =~= s.subrange(0, k) + insert_op(x, s.subrange(k, s.len() as int), reverse));
+    }
+}
+
+fn insert_op_exec(ops: &Vec<Operand>, s: &mut Vec<usize>, x: usize, reverse: bool)
+    requires
+        x < ops.len(),
+        idx_ok(old(s)@, ops@.len()),
+    ensures
+        idx_ok(final(s)@, ops@.len()),
+        ops_at(ops_view(ops), final(s)@) == insert_op(ops_view(ops)[x as int], ops_at(ops_view(ops), old(s)@), reverse),
+{
+    let ghost o = ops_view(ops);
+    let ghost sv = ops_at(o, s@);
+    let ghost xv = o[x as int];
+    let mut j: usize = 0;
+    while j < s.len()
+        invariant
+            j <= s.len(),
+            x < ops.len(),
+            o == ops_view(ops),
+            xv == o[x as int],
+            idx_ok(s@, ops@.len()),
+            sv == ops_at(o, s@),
+            sv == ops_at(o, old(s)@),
+            forall|i: int| 0 <= i < j ==> !before(xv.name, (#[trigger] sv[i]).name, reverse),
+        decreases s.len() - j,
+    {
+        assert(sv[j as int] == o[s@[j as int] as int]);
+        assert(sv[j as int].name == ops@[s@[j as int] as int].name@);
+        assert(xv.name == ops@[x as int].name@);
+        if before_exec(&ops[x].name, &ops[s[j]].name, reverse) {
+            proof {
+                lemma_insert_op_skip(xv, sv, j as int, reverse);
+                let t = sv.subrange(j as int, sv.len() as int);
+                assert(t[0] == sv[j as int]);
+                assert(insert_op(xv, t, reverse) == seq![xv] + t);
+            }
+            let ghost s0 = s@;
+            s.insert(j, x);
+            assert(ops_at(o, s@) =~= sv.subrange(0, j as int) + (seq![xv] + sv.subrange(j as int, sv.len() as int)));
+            return;
+        }
+        j += 1;
+    }
+    proof {
+        lemma_insert_op_skip(xv, sv, j as int, reverse);
+        assert(sv.subrange(j as int, sv.len() as int) =~= Seq::<OperandS>::empty());
+        assert(sv.subrange(0, j as int) =~= sv);
+    }
+    s.push(x);
+    assert(ops_at(o, s@) =~= sv + seq![xv]);
+}
+
+fn sort_op_indices(ops: &Vec<Operand>, sel: &Vec<usize>, reverse: bool) -> (r: Vec<usize>)
+    requires
+        idx_ok(sel@, ops@.len()),
+    ensures
+        idx_ok(r@, ops@.len()),
+        ops_at(ops_view(ops), r@) == sort_ops(ops_at(ops_view(ops), sel@), reverse),
+{
+    let ghost o = ops_view(ops);
+    let ghost l = ops_at(o, sel@);
+    let mut out: Vec<usize> = Vec::new();
+    let mut i: usize = 0;
+    assert(l.subrange(0, 0) =~= Seq::<OperandS>::empty());
+    assert(ops_at(o, out@) =~= Seq::<OperandS>::empty());
+    while i < sel.len()
+        invariant
+            i <= sel.len(),
+            o == ops_view(ops),
+            l == ops_at(o, sel@),
+            idx_ok(sel@, ops@.len()),
+            idx_ok(out@, ops@.len()),
+            ops_at(o, out@) == sort_ops(l.subrange(0, i as int), reverse),
+        decreases sel.len() - i,
+    {
+        let ghost p = l.subrange(0, i + 1);
+        assert(p.subrange(0, i as int) =~= l.subrange(0, i as int));
+        assert(p[i as int] == o[sel@[i as int] as int]);
+        insert_op_exec(ops, &mut out, sel[i], reverse);
+        i += 1;
+    }
+    assert(l.subrange(0, l.len() as int) =~= l);
+    out
+}
+
+fn msg_cannot_access_exec() -> (r: Vec<u8>)
+    ensures
+        r@ == msg_cannot_access(),
+{
+    let mut r = Vec::new();
+    r.push(118u8); r.push(108u8); r.push(115u8); r.push(58u8); r.push(32u8);
+    r.push(99u8); r.push(97u8); r.push(110u8); r.push(110u8); r.push(111u8); r.push(116u8); r.push(32u8);
+    r.push(97u8); r.push(99u8); r.push(99u8); r.push(101u8); r.push(115u8); r.push(115u8); r.push(32u8);
+    assert(r@ =~= msg_cannot_access());
+    r
+}
+
+fn msg_cannot_open_exec() -> (r: Vec<u8>)
+    ensures
+        r@ == msg_cannot_open(),
+{
+    let mut r = Vec::new();
+    r.push(118u8); r.push(108u8); r.push(115u8); r.push(58u8); r.push(32u8);
+    r.push(99u8); r.push(97u8); r.push(110u8); r.push(110u8); r.push(111u8); r.push(116u8); r.push(32u8);
+    r.push(111u8); r.push(112u8); r.push(101u8); r.push(110u8); r.push(32u8);
+    r.push(100u8); r.push(105u8); r.push(114u8); r.push(101u8); r.push(99u8); r.push(116u8); r.push(111u8);
+    r.push(114u8); r.push(121u8); r.push(32u8);
+    assert(r@ =~= msg_cannot_open());
+    r
+}
+
+/// `prefix + escape(name) + ": " + escape(msg)`
+fn error_text(prefix: Vec<u8>, name: &Vec<u8>, msg: &Vec<u8>) -> (r: Vec<u8>)
+    ensures
+        r@ == prefix@ + escape(name@) + colon_space() + escape(msg@),
+{
+    let mut r = prefix;
+    let en = escape_exec(name);
+    append_bytes(&mut r, &en);
+    r.push(58u8);
+    r.push(32u8);
+    let em = escape_exec(msg);
+    append_bytes(&mut r, &em);
+    assert(r@ =~= prefix@ + escape(name@) + colon_space() + escape(msg@));
+    r
+}
+
+// ---- groups (D11-D16) -------------------------------------------------------
+
+proof fn lemma_op_names_index(ops: Seq<OperandS>)
+    ensures
+        op_names(ops).len() == ops.len(),
+        forall|i: int| 0 <= i < ops.len() ==> #[trigger] op_names(ops)[i] == ops[i].name,
+    decreases ops.len(),
+{
+    if ops.len() > 0 {
+        let t = ops.subrange(1, ops.len() as int);
+        lemma_op_names_index(t);
+        assert forall|i: int| 0 <= i < ops.len() implies #[trigger] op_names(ops)[i] == ops[i].name by {
+            if i > 0 {
+                assert(t[i - 1] == ops[i]);
+            }
+        }
+    }
+}
+
+proof fn lemma_dir_groups_index(dirs: Seq<OperandS>, req: RequestS)
+    ensures
+        dir_groups(dirs, req).len() == dirs.len(),
+        forall|i: int| 0 <= i < dirs.len() ==> #[trigger] dir_groups(dirs, req)[i] == dir_group(dirs[i], req),
+    decreases dirs.len(),
+{
+    if dirs.len() > 0 {
+        let t = dirs.subrange(1, dirs.len() as int);
+        lemma_dir_groups_index(t, req);
+        assert forall|i: int| 0 <= i < dirs.len() implies #[trigger] dir_groups(dirs, req)[i] == dir_group(dirs[i], req) by {
+            if i > 0 {
+                assert(t[i - 1] == dirs[i]);
+            }
+        }
+    }
+}
+
+/// Escape a list of names, in order.
+fn escape_lines(names: &Vec<Vec<u8>>, out: &mut Vec<Vec<u8>>)
+    ensures
+        lines_view(final(out)@) == lines_view(old(out)@) + escape_all(lines_view(names@)),
+{
+    let ghost o = lines_view(out@);
+    let ghost l = lines_view(names@);
+    proof {
+        lemma_escape_all_index(l);
+    }
+    let mut i: usize = 0;
+    while i < names.len()
+        invariant
+            i <= names.len(),
+            l == lines_view(names@),
+            escape_all(l).len() == l.len(),
+            forall|k: int| 0 <= k < l.len() ==> #[trigger] escape_all(l)[k] == escape(l[k]),
+            lines_view(out@) == o + escape_all(l).subrange(0, i as int),
+        decreases names.len() - i,
+    {
+        let ghost before_out = lines_view(out@);
+        out.push(escape_exec(&names[i]));
+        assert(escape_all(l).subrange(0, i + 1) =~= escape_all(l).subrange(0, i as int).push(escape(l[i as int])));
+        assert(lines_view(out@) =~= before_out.push(escape(l[i as int])));
+        i += 1;
+    }
+    assert(escape_all(l).subrange(0, l.len() as int) =~= escape_all(l));
+}
+
+fn file_group_exec(req: &Request, sf: &Vec<usize>) -> (r: Vec<Vec<u8>>)
+    requires
+        idx_ok(sf@, req.operands@.len()),
+    ensures
+        lines_view(r@) == escape_all(op_names(ops_at(ops_view(&req.operands), sf@))),
+{
+    let ghost o = ops_view(&req.operands);
+    let ghost s = ops_at(o, sf@);
+    let mut names: Vec<Vec<u8>> = Vec::new();
+    let mut i: usize = 0;
+    proof {
+        lemma_op_names_index(s);
+    }
+    while i < sf.len()
+        invariant
+            i <= sf.len(),
+            o == ops_view(&req.operands),
+            s == ops_at(o, sf@),
+            idx_ok(sf@, req.operands@.len()),
+            op_names(s).len() == s.len(),
+            forall|k: int| 0 <= k < s.len() ==> #[trigger] op_names(s)[k] == s[k].name,
+            lines_view(names@) == op_names(s).subrange(0, i as int),
+        decreases sf.len() - i,
+    {
+        let ghost before_names = lines_view(names@);
+        assert(sf@[i as int] < req.operands@.len());
+        names.push(copy_bytes(&req.operands[sf[i]].name));
+        assert(s[i as int] == o[sf@[i as int] as int]);
+        assert(op_names(s).subrange(0, i + 1) =~= op_names(s).subrange(0, i as int).push(s[i as int].name));
+        assert(lines_view(names@) =~= before_names.push(s[i as int].name));
+        i += 1;
+    }
+    assert(op_names(s).subrange(0, s.len() as int) =~= op_names(s));
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    escape_lines(&names, &mut out);
+    assert(lines_view(out@) =~= escape_all(op_names(s)));
+    out
+}
+
+fn dir_group_exec(req: &Request, x: usize) -> (r: Vec<Vec<u8>>)
+    requires
+        x < req.operands@.len(),
+    ensures
+        lines_view(r@) == dir_group(req@.operands[x as int], req@),
+{
+    let op = &req.operands[x];
+    let ghost ov = req@.operands[x as int];
+    assert(ov == op@);
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    if req.operands.len() >= 2 {
+        let mut h = escape_exec(&op.name);
+        h.push(58u8);
+        assert(h@ =~= escape(ov.name) + seq![58u8]);
+        out.push(h);
+        assert(lines_view(out@) =~= seq![escape(ov.name) + seq![58u8]]);
+    } else {
+        assert(lines_view(out@) =~= Seq::<Seq<u8>>::empty());
+    }
+    let listed = match &op.outcome {
+        Outcome::Dir(es) => listed_exec(es, req.all),
+        _ => {
+            let empty: Vec<Vec<u8>> = Vec::new();
+            assert(lines_view(empty@) =~= Seq::<Seq<u8>>::empty());
+            listed_exec(&empty, req.all)
+        },
+    };
+    assert(lines_view(listed@) == listed_names(entries_of(ov.outcome), req.all));
+    let sorted = sort_unique_exec(&listed, req.reverse);
+    escape_lines(&sorted, &mut out);
+    out
+}
+
+/// Append one group, with the D16 separator.
+fn append_group(out: &mut Vec<Vec<u8>>, g: &Vec<Vec<u8>>, first: bool, Ghost(done): Ghost<Seq<Seq<Seq<u8>>>>)
+    requires
+        lines_view(old(out)@) == join_groups(done),
+        first == (done.len() == 0),
+    ensures
+        lines_view(final(out)@) == join_groups(done.push(lines_view(g@))),
+{
+    let ghost gv = lines_view(g@);
+    let ghost o = lines_view(out@);
+    assert(done.push(gv).subrange(0, done.len() as int) =~= done);
+    if !first {
+        out.push(Vec::new());
+        assert(lines_view(out@) =~= o + seq![Seq::<u8>::empty()]);
+    }
+    let ghost mid = lines_view(out@);
+    let mut i: usize = 0;
+    while i < g.len()
+        invariant
+            i <= g.len(),
+            gv == lines_view(g@),
+            lines_view(out@) == mid + gv.subrange(0, i as int),
+        decreases g.len() - i,
+    {
+        let ghost before_out = lines_view(out@);
+        out.push(copy_bytes(&g[i]));
+        assert(gv.subrange(0, i + 1) =~= gv.subrange(0, i as int).push(gv[i as int]));
+        assert(lines_view(out@) =~= before_out.push(gv[i as int]));
+        i += 1;
+    }
+    assert(gv.subrange(0, gv.len() as int) =~= gv);
+    if first {
+        assert(done.push(gv).len() == 1 && done.push(gv)[0] == gv);
+        assert(mid =~= Seq::<Seq<u8>>::empty());
+        assert(lines_view(out@) =~= gv);
+    } else {
+        assert(done.push(gv)[done.len() as int] == gv);
+        assert(lines_view(out@) =~= o + seq![Seq::<u8>::empty()] + gv);
+    }
+}
 // </vc-helpers>
 
 /// D2, D20: total, never panics, output exactly `ls(req@)`.
@@ -498,8 +1239,154 @@ pub fn run(req: &Request) -> (res: Response)
         res@ == ls(req@),
 {
     // <vc-code>
-    assume(false);
-    unreached()
+    let ghost r = req@;
+    let ghost o = r.operands;
+    let ops = &req.operands;
+    let n = ops.len();
+    assert(o =~= ops_view(ops));
+    let ghost on = o.len() as int;
+    // Pass 1, in argument order: classify operands, collect errors (D9, D17, D18).
+    let mut files: Vec<usize> = Vec::new();
+    let mut dirs: Vec<usize> = Vec::new();
+    let mut stderr: Vec<Vec<u8>> = Vec::new();
+    let mut failed = false;
+    let mut i: usize = 0;
+    assert(o.subrange(0, on) =~= o);
+    assert(ops_at(o, files@) + file_ops(o) =~= file_ops(o));
+    assert(ops_at(o, dirs@) + dir_ops(o) =~= dir_ops(o));
+    assert(lines_view(stderr@) + error_lines(o) =~= error_lines(o));
+    while i < n
+        invariant
+            n == ops@.len(),
+            o == ops_view(ops),
+            on == o.len(),
+            i <= n,
+            idx_ok(files@, n as nat),
+            idx_ok(dirs@, n as nat),
+            ops_at(o, files@) + file_ops(o.subrange(i as int, on)) == file_ops(o),
+            ops_at(o, dirs@) + dir_ops(o.subrange(i as int, on)) == dir_ops(o),
+            lines_view(stderr@) + error_lines(o.subrange(i as int, on)) == error_lines(o),
+            (failed || any_failed(o.subrange(i as int, on))) == any_failed(o),
+        decreases n - i,
+    {
+        let ghost t = o.subrange(i as int, on);
+        let ghost rest = o.subrange(i + 1, on);
+        assert(t.subrange(1, t.len() as int) =~= rest);
+        assert(t[0] == o[i as int] && o[i as int] == ops@[i as int]@);
+        let ghost f0 = ops_at(o, files@);
+        let ghost d0 = ops_at(o, dirs@);
+        let ghost e0 = lines_view(stderr@);
+        match &ops[i].outcome {
+            Outcome::File => {
+                files.push(i);
+                assert(ops_at(o, files@) =~= f0 + seq![o[i as int]]);
+                assert(file_ops(t) == seq![t[0]] + file_ops(rest));
+                assert(ops_at(o, files@) + file_ops(rest) =~= f0 + file_ops(t));
+                assert(dir_ops(t) =~= dir_ops(rest));
+                assert(error_lines(t) =~= error_lines(rest));
+            },
+            Outcome::Dir(_) => {
+                dirs.push(i);
+                assert(ops_at(o, dirs@) =~= d0 + seq![o[i as int]]);
+                assert(dir_ops(t) == seq![t[0]] + dir_ops(rest));
+                assert(ops_at(o, dirs@) + dir_ops(rest) =~= d0 + dir_ops(t));
+                assert(file_ops(t) =~= file_ops(rest));
+                assert(error_lines(t) =~= error_lines(rest));
+            },
+            Outcome::Missing(m) => {
+                stderr.push(error_text(msg_cannot_access_exec(), &ops[i].name, m));
+                failed = true;
+                assert(error_lines(t) == error_line(t[0]) + error_lines(rest));
+                assert(lines_view(stderr@) + error_lines(rest) =~= e0 + error_lines(t));
+                assert(file_ops(t) =~= file_ops(rest));
+                assert(dir_ops(t) =~= dir_ops(rest));
+            },
+            Outcome::Unreadable(m) => {
+                stderr.push(error_text(msg_cannot_open_exec(), &ops[i].name, m));
+                failed = true;
+                assert(error_lines(t) == error_line(t[0]) + error_lines(rest));
+                assert(lines_view(stderr@) + error_lines(rest) =~= e0 + error_lines(t));
+                assert(file_ops(t) =~= file_ops(rest));
+                assert(dir_ops(t) =~= dir_ops(rest));
+            },
+        }
+        i += 1;
+    }
+    assert(o.subrange(on, on) =~= Seq::<OperandS>::empty());
+    assert(ops_at(o, files@) =~= file_ops(o));
+    assert(ops_at(o, dirs@) =~= dir_ops(o));
+    assert(lines_view(stderr@) =~= error_lines(o));
+    // Pass 2: groups in output order (D13-D16).
+    let sf = sort_op_indices(ops, &files, req.reverse);
+    let sd = sort_op_indices(ops, &dirs, req.reverse);
+    let ghost sdv = ops_at(o, sd@);
+    let ghost fg: Seq<Seq<Seq<u8>>> = if file_ops(o).len() > 0 {
+        seq![file_group(r)]
+    } else {
+        seq![]
+    };
+    proof {
+        lemma_dir_groups_index(sdv, r);
+    }
+    assert(groups(r) == fg + dir_groups(sdv, r));
+    let mut stdout: Vec<Vec<u8>> = Vec::new();
+    let ghost mut done: Seq<Seq<Seq<u8>>> = seq![];
+    assert(lines_view(stdout@) =~= join_groups(done));
+    if files.len() > 0 {
+        let g = file_group_exec(req, &sf);
+        append_group(&mut stdout, &g, true, Ghost(done));
+        proof {
+            done = done.push(lines_view(g@));
+        }
+        assert(done =~= fg);
+    } else {
+        assert(done =~= fg);
+    }
+    let mut k: usize = 0;
+    while k < sd.len()
+        invariant
+            k <= sd.len(),
+            idx_ok(sd@, req.operands@.len()),
+            sdv == ops_at(o, sd@),
+            o == ops_view(&req.operands),
+            r == req@,
+            dir_groups(sdv, r).len() == sdv.len(),
+            forall|j: int| 0 <= j < sdv.len() ==> #[trigger] dir_groups(sdv, r)[j] == dir_group(sdv[j], r),
+            (files.len() == 0) == (fg.len() == 0),
+            fg.len() <= 1,
+            done == fg + dir_groups(sdv, r).subrange(0, k as int),
+            lines_view(stdout@) == join_groups(done),
+        decreases sd.len() - k,
+    {
+        assert(sd@[k as int] < req.operands@.len());
+        let g = dir_group_exec(req, sd[k]);
+        assert(sdv[k as int] == o[sd@[k as int] as int]);
+        let first = files.len() == 0 && k == 0;
+        assert(first == (done.len() == 0));
+        append_group(&mut stdout, &g, first, Ghost(done));
+        proof {
+            assert(dir_groups(sdv, r).subrange(0, k + 1) =~= dir_groups(sdv, r).subrange(0, k as int).push(
+                dir_group(sdv[k as int], r),
+            ));
+            done = done.push(lines_view(g@));
+            assert(done =~= fg + dir_groups(sdv, r).subrange(0, k + 1));
+        }
+        k += 1;
+    }
+    assert(dir_groups(sdv, r).subrange(0, sdv.len() as int) =~= dir_groups(sdv, r));
+    assert(done =~= groups(r));
+    let exit: u8 = if failed {
+        2
+    } else {
+        0
+    };
+    assert(failed == any_failed(o)) by {
+        assert(!any_failed(Seq::<OperandS>::empty()));
+    }
+    let res = Response { stdout, stderr, exit };
+    assert(res@.stdout == ls(r).stdout);
+    assert(res@.stderr == ls(r).stderr);
+    res
     // </vc-code>
 }
 
