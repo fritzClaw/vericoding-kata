@@ -169,6 +169,8 @@ pub open spec fn escape_byte(b: u8) -> Seq<u8> {
         seq![92u8, 110u8]  // LF -> `\n`
     } else if b == 9 {
         seq![92u8, 116u8]  // TAB -> `\t`
+    } else if b == 58 {
+        seq![92u8, 58u8]  // `:` -> `\:` (headers stay unforgeable, D15)
     } else if 32 <= b && b <= 126 {
         seq![b]  // printable ASCII
     } else {
@@ -1564,6 +1566,17 @@ proof fn spec_e10_robust_entries() {
 spec fn spec_d14_equal_names_keep_argument_order_first() -> OperandS { op(n_d1(), OutcomeS::Dir(seq![n_a()])) }
 spec fn spec_d14_equal_names_keep_argument_order_second() -> OperandS { op(n_d1(), OutcomeS::Dir(seq![n_b()])) }
 
+spec fn spec_e12_colon_r() -> RequestS {
+    req(false, false, seq![op(seq![120u8, 58], OutcomeS::File), op(n_d2(), OutcomeS::Dir(seq![]))])
+}
+
+proof fn spec_e12_colon_cannot_forge_header() {
+    // `vls x: d2` (x: a file, d2 empty) -> x\: | d2:
+    assert(ls(spec_e12_colon_r()).stdout == seq![seq![120u8, 92, 58], seq![], header(n_d2())]) by (compute_only);
+    // reject: `x:` (identical to the output of `vls x d2` for two empty dirs)
+    assert(ls(spec_e12_colon_r()).stdout != seq![header(seq![120u8]), seq![], header(n_d2())]) by (compute_only);
+}
+
 proof fn spec_d14_equal_names_keep_argument_order() {
     // two operands named d1 with different contents keep argument order, also with -r
     assert(ls(req(false, false, seq![spec_d14_equal_names_keep_argument_order_first(), spec_d14_equal_names_keep_argument_order_second()])).stdout == seq![
@@ -2149,6 +2162,14 @@ mod tests {
         assert_eq!(
             out(false, false, vec![dir("d", &[b"a\nb", b"a\\b", "caf\u{e9}".as_bytes()])]).0,
             ["a\\nb", "a\\\\b", "caf\\xc3\\xa9"]
+        );
+    }
+
+    #[test]
+    fn e12_colon() {
+        assert_eq!(
+            out(false, false, vec![file("x:"), dir("d", &[])]).0,
+            ["x\\:", "", "d:"]
         );
     }
 
