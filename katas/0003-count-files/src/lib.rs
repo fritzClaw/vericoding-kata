@@ -1697,6 +1697,340 @@ proof fn lemma_unparse_injective(x: Seq<GroupS>, y: Seq<GroupS>)
     lemma_round_trip(x);
     lemma_round_trip(y);
 }
+
+// ===== part 5: the executable decoder =======================================
+
+fn split_exec(input: &Vec<u8>) -> (r: (Vec<Vec<u8>>, Vec<u8>))
+    ensures
+        (SplitS { lines: lines_view(r.0@), cur: r.1@ }) == split_run(split_init(), input@),
+{
+    let mut lines: Vec<Vec<u8>> = Vec::new();
+    let mut cur: Vec<u8> = Vec::new();
+    let mut i: usize = 0;
+    assert(input@.subrange(0, 0) =~= Seq::<u8>::empty());
+    assert(lines_view(lines@) =~= Seq::<Seq<u8>>::empty());
+    assert(cur@ =~= Seq::<u8>::empty());
+    while i < input.len()
+        invariant
+            i <= input.len(),
+            (SplitS { lines: lines_view(lines@), cur: cur@ }) == split_run(split_init(), input@.subrange(0, i as int)),
+        decreases input.len() - i,
+    {
+        let ghost pre = input@.subrange(0, i as int);
+        let ghost next = input@.subrange(0, i + 1);
+        assert(next.subrange(0, i as int) =~= pre);
+        assert(next[i as int] == input@[i as int]);
+        let ghost lv = lines_view(lines@);
+        let ghost cv = cur@;
+        let b = input[i];
+        if b == 10 {
+            lines.push(cur);
+            cur = Vec::new();
+            assert(lines_view(lines@) =~= lv.push(cv));
+            assert(cur@ =~= Seq::<u8>::empty());
+        } else {
+            cur.push(b);
+        }
+        i += 1;
+    }
+    assert(input@.subrange(0, input@.len() as int) =~= input@);
+    (lines, cur)
+}
+
+fn unhex_exec(c: u8) -> (r: u8)
+    requires
+        is_hex_digit(c),
+    ensures
+        r == unhex(c),
+        r < 16,
+{
+    if c <= 57 {
+        c - 48
+    } else {
+        c - 87
+    }
+}
+
+fn is_hex_digit_exec(c: u8) -> (r: bool)
+    ensures
+        r == is_hex_digit(c),
+{
+    (48 <= c && c <= 57) || (97 <= c && c <= 102)
+}
+
+proof fn lemma_hex_digit_unhex(c: u8)
+    requires
+        is_hex_digit(c),
+    ensures
+        ls::hex_digit(unhex(c)) == c,
+{
+}
+
+proof fn lemma_hex_split(hi: u8, lo: u8)
+    requires
+        hi < 16,
+        lo < 16,
+    ensures
+        ((hi * 16 + lo) as u8) / 16 == hi,
+        ((hi * 16 + lo) as u8) % 16 == lo,
+{
+    assert(hi * 16 + lo < 256) by (nonlinear_arith)
+        requires
+            hi < 16,
+            lo < 16,
+    ;
+    assert((hi * 16 + lo) / 16 == hi as int && (hi * 16 + lo) % 16 == lo as int) by (nonlinear_arith)
+        requires
+            hi < 16,
+            lo < 16,
+    ;
+}
+
+fn token_exec(l: &Vec<u8>, i: usize) -> (r: Option<(u8, usize)>)
+    requires
+        i <= l.len(),
+    ensures
+        match (r, token(l@.subrange(i as int, l@.len() as int))) {
+            (Some((b, n)), Some((b2, n2))) => b == b2 && n as nat == n2,
+            (None, None) => true,
+            _ => false,
+        },
+{
+    let ghost t = l@.subrange(i as int, l@.len() as int);
+    let len = l.len();
+    if i == len {
+        return None;
+    }
+    assert(t[0] == l@[i as int]);
+    let c = l[i];
+    if c == 92 {
+        if len - i >= 2 {
+            assert(t[1] == l@[i + 1]);
+        }
+        if len - i >= 2 && l[i + 1] == 92 {
+            return Some((92u8, 2usize));
+        }
+        if len - i >= 2 && l[i + 1] == 110 {
+            return Some((10u8, 2usize));
+        }
+        if len - i >= 2 && l[i + 1] == 116 {
+            return Some((9u8, 2usize));
+        }
+        if len - i >= 2 && l[i + 1] == 58 {
+            return Some((58u8, 2usize));
+        }
+        if len - i >= 4 && l[i + 1] == 120 && is_hex_digit_exec(l[i + 2]) && is_hex_digit_exec(l[i + 3]) {
+            assert(t[2] == l@[i + 2] && t[3] == l@[i + 3]);
+            let hi = unhex_exec(l[i + 2]);
+            let lo = unhex_exec(l[i + 3]);
+            proof {
+                lemma_hex_split(hi, lo);
+            }
+            let v: u8 = hi * 16 + lo;
+            assert(v == hex_value(t[2], t[3]));
+            let canonical = !(v == 92 || v == 10 || v == 9 || v == 58 || (32 <= v && v <= 126));
+            proof {
+                let e = ls::escape_byte(v);
+                let w = t.subrange(0, 4);
+                if canonical {
+                    lemma_hex_digit_unhex(t[2]);
+                    lemma_hex_digit_unhex(t[3]);
+                    assert(e =~= w);
+                } else {
+                    assert(e.len() <= 2);
+                    assert(e != w);
+                }
+            }
+            if canonical {
+                return Some((v, 4usize));
+            }
+        }
+        return None;
+    }
+    if c != 58 && c != 92 && 32 <= c && c <= 126 {
+        return Some((c, 1usize));
+    }
+    proof {
+        if c != 58 && ls::escape_byte(c) == seq![c] {
+            assert(ls::escape_byte(c).len() == 1);
+        }
+    }
+    None
+}
+
+pub open spec fn prepend(out: Seq<u8>, r: Option<(Seq<u8>, bool)>) -> Option<(Seq<u8>, bool)> {
+    match r {
+        Some((v, h)) => Some((out + v, h)),
+        None => None,
+    }
+}
+
+fn dec_line_exec(l: &Vec<u8>) -> (r: Option<(Vec<u8>, bool)>)
+    ensures
+        match r {
+            Some((v, h)) => dec_line(l@) == Some((v@, h)),
+            None => dec_line(l@) == None::<(Seq<u8>, bool)>,
+        },
+{
+    let mut out: Vec<u8> = Vec::new();
+    let mut i: usize = 0;
+    assert(l@.subrange(0, l@.len() as int) =~= l@);
+    proof {
+        if let Some((v, h)) = dec_line(l@) {
+            assert(out@ + v =~= v);
+        }
+    }
+    loop
+        invariant
+            i <= l.len(),
+            dec_line(l@) == prepend(out@, dec_line(l@.subrange(i as int, l@.len() as int))),
+        decreases l.len() - i,
+    {
+        let ghost t = l@.subrange(i as int, l@.len() as int);
+        if i == l.len() {
+            assert(t.len() == 0);
+            assert(out@ + Seq::<u8>::empty() =~= out@);
+            return Some((out, false));
+        }
+        assert(t[0] == l@[i as int]);
+        if l.len() - i == 1 && l[i] == 58 {
+            assert(out@ + Seq::<u8>::empty() =~= out@);
+            return Some((out, true));
+        }
+        match token_exec(l, i) {
+            None => {
+                return None;
+            },
+            Some((b, n)) => {
+                proof {
+                    lemma_token_shape(t);
+                    assert(t.subrange(n as int, t.len() as int) =~= l@.subrange(i + n, l@.len() as int));
+                    let rest = l@.subrange(i + n, l@.len() as int);
+                    if let Some((v, h)) = dec_line(rest) {
+                        assert(out@ + (seq![b] + v) =~= out@.push(b) + v);
+                    }
+                }
+                out.push(b);
+                i = i + n;
+            },
+        }
+    }
+}
+
+pub open spec fn pview(ok: bool, doc: Seq<Group>, fresh: bool) -> PState {
+    PState { ok, doc: doc_view(doc), fresh }
+}
+
+fn decode_impl(input: &Vec<u8>) -> (r: Option<Vec<Group>>)
+    ensures
+        match r {
+            Some(d) => parse_doc(input@) == Some(doc_view(d@)),
+            None => parse_doc(input@) == None::<Seq<GroupS>>,
+        },
+{
+    let (lines, cur) = split_exec(input);
+    if cur.len() > 0 {
+        return None;
+    }
+    let ghost lv = lines_view(lines@);
+    assert(split_lines(input@) == Some(lv));
+    let mut ok = true;
+    let mut doc: Vec<Group> = Vec::new();
+    let mut fresh = true;
+    let mut i: usize = 0;
+    assert(lv.subrange(0, 0) =~= Seq::<Seq<u8>>::empty());
+    assert(doc_view(doc@) =~= Seq::<GroupS>::empty());
+    while i < lines.len()
+        invariant
+            i <= lines.len(),
+            lv == lines_view(lines@),
+            pview(ok, doc@, fresh) == prun(pinit(), lv.subrange(0, i as int)),
+            !fresh ==> doc.len() > 0,
+        decreases lines.len() - i,
+    {
+        let ghost pre = lv.subrange(0, i as int);
+        assert(lv.subrange(0, i + 1).subrange(0, i as int) =~= pre);
+        assert(lv.subrange(0, i + 1)[i as int] == lines@[i as int]@);
+        let ghost dv = doc_view(doc@);
+        let line = &lines[i];
+        if ok {
+            if line.len() == 0 {
+                if fresh {
+                    ok = false;
+                    doc = Vec::new();
+                    assert(doc_view(doc@) =~= Seq::<GroupS>::empty());
+                } else {
+                    fresh = true;
+                }
+            } else {
+                match dec_line_exec(line) {
+                    None => {
+                        ok = false;
+                        doc = Vec::new();
+                        fresh = true;
+                        assert(doc_view(doc@) =~= Seq::<GroupS>::empty());
+                    },
+                    Some((v, h)) => {
+                        let ghost vv = v@;
+                        if h {
+                            if fresh {
+                                let g = Group { header: Some(v), names: Vec::new() };
+                                assert(lines_view(g.names@) =~= Seq::<Seq<u8>>::empty());
+                                let ghost gv = g@;
+                                doc.push(g);
+                                fresh = false;
+                                assert(doc_view(doc@) =~= dv.push(gv));
+                            } else {
+                                ok = false;
+                                doc = Vec::new();
+                                fresh = true;
+                                assert(doc_view(doc@) =~= Seq::<GroupS>::empty());
+                            }
+                        } else if fresh {
+                            if doc.len() == 0 {
+                                let mut names: Vec<Vec<u8>> = Vec::new();
+                                names.push(v);
+                                assert(lines_view(names@) =~= seq![vv]);
+                                let g = Group { header: None, names };
+                                let ghost gv = g@;
+                                doc.push(g);
+                                fresh = false;
+                                assert(doc_view(doc@) =~= seq![gv]);
+                            } else {
+                                ok = false;
+                                doc = Vec::new();
+                                fresh = true;
+                                assert(doc_view(doc@) =~= Seq::<GroupS>::empty());
+                            }
+                        } else {
+                            let ghost d0 = doc@;
+                            match doc.pop() {
+                                Some(g) => {
+                                    let ghost g0 = g@;
+                                    let mut g = g;
+                                    g.names.push(v);
+                                    assert(lines_view(g.names@) =~= g0.names.push(vv));
+                                    let ghost gv = g@;
+                                    doc.push(g);
+                                    assert(doc@ =~= d0.update(d0.len() - 1, doc@[d0.len() - 1]));
+                                    assert(doc_view(doc@) =~= add_name(dv, vv));
+                                },
+                                None => {},
+                            }
+                        }
+                    },
+                }
+            }
+        }
+        i += 1;
+    }
+    assert(lv.subrange(0, lv.len() as int) =~= lv);
+    if ok && !(fresh && doc.len() > 0) {
+        Some(doc)
+    } else {
+        None
+    }
+}
 // </vc-helpers>
 
 /// D5: add the newlines of `chunk` to `acc`; `None` on u64 overflow.
@@ -1748,8 +2082,23 @@ pub fn decode(input: &Vec<u8>) -> (r: Option<Vec<Group>>)
         },
 {
     // <vc-code>
-    assume(false);
-    unreached()
+    let r = decode_impl(input);
+    proof {
+        match &r {
+            Some(d) => {
+                lemma_parse_reverse(input@);
+                assert forall|x: Seq<GroupS>| wf(x) && #[trigger] unparse(x) == input@ implies x == doc_view(d@) by {
+                    lemma_round_trip(x);
+                }
+            },
+            None => {
+                assert forall|x: Seq<GroupS>| wf(x) implies #[trigger] unparse(x) != input@ by {
+                    lemma_round_trip(x);
+                }
+            },
+        }
+    }
+    r
     // </vc-code>
 }
 
