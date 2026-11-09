@@ -1,6 +1,6 @@
 ---
 id: 0003-count-files
-status: grilled
+status: specced
 owner: fritzClaw
 ---
 
