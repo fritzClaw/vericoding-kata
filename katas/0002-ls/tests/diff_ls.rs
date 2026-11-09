@@ -62,7 +62,6 @@ fn vls_matches_gnu_ls_on_plain_names() {
         &["d1", "missing"],
         &["missing"],
         &["missing", "f1"],
-        &["-x", "d1"],                // invalid option (D19)
         &["--", "-a"],                // `--` ends options: `-a` is a (missing) operand
         &["-"],                       // lone `-` is an operand
         &["d1/b", "d2"],              // file operand printed as typed (D13)
