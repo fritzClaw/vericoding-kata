@@ -153,6 +153,19 @@ class VcCheckTest(unittest.TestCase):
         self.add_helper("proof fn l() ensures false { assume(false); }")
         self.assertRejected("`assume`")
 
+    def test_proof_stub_is_pending(self):
+        self.edit(LIB, r"^proof fn spec_examples\(\) \{$",
+                  "proof fn spec_examples() {}\nproof fn theorem_x() ensures true {\n    // <vc-code>\n    assume(false);\n    // </vc-code>\n}\nproof fn _y() {")
+        self.vc("lock", NAME)
+        self.assertEqual(self.check().returncode, 0)
+
+    def test_assume_beside_proof_stub_rejected(self):
+        self.edit(LIB, r"^proof fn spec_examples\(\) \{$",
+                  "proof fn spec_examples() {}\nproof fn theorem_x() ensures true {\n    // <vc-code>\n    assume(false);\n    // </vc-code>\n}\nproof fn _y() {")
+        self.vc("lock", NAME)
+        self.edit(LIB, r"^    assume\(false\);\n    // </vc-code>\n\}\nproof fn _y", "    assume(false);\n    assume(true);\n    // </vc-code>\n}\nproof fn _y")
+        self.assertRejected("`assume`")
+
     def test_modified_stub_is_no_longer_exempt(self):
         self.edit(LIB, r"^    unreached\(\)$", "    let _x = 1;\n    unreached()")
         self.assertRejected("`assume`")

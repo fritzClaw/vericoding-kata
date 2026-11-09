@@ -37,6 +37,9 @@ intent*, not for ease of proof.
      }
      ```
    - One empty `// <vc-helpers>` / `// </vc-helpers>` region for the prover.
+   - Theorems the intent asks for are frozen `proof fn` statements
+     (`requires`/`ensures`); their proof is vericode work, so the body is
+     `// <vc-code>` `assume(false);` `// </vc-code>`.
 3. **Write spec tests** (frozen, `proof fn`, they never run):
    - Every Example: assert the spec **accepts** the expected answer and
      **rejects** the listed plausible wrong answer. A spec that cannot reject
