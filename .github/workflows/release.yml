@@ -1,9 +1,13 @@
 name: release
 
-# Tag `vX.Y.Z` on main to publish a GitHub Release with every binary of the
-# workspace, built for Apple Silicon (aarch64-apple-darwin, e.g. Mac M1).
+# Publish a GitHub Release with every binary of the workspace, built for
+# Apple Silicon (aarch64-apple-darwin, e.g. Mac M1), in either way:
+#   - push a tag `vX.Y.Z` on main, or
+#   - run this workflow manually on main with input `version: vX.Y.Z`
+#     (the release step then creates the tag at the built commit).
 # Nothing is published unless the full gate passes on that same machine.
-# On PRs touching this workflow it runs as a dry run (build + artifact only).
+# PRs touching this workflow, and manual runs without a version, are dry runs
+# (build + artifact only).
 
 on:
   push:
@@ -13,6 +17,11 @@ on:
       - ".github/workflows/release.yml"
       - "scripts/**"
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, e.g. v0.1.0 (empty: dry run). Run on main."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -27,6 +36,7 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     outputs:
       version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
     steps:
       - uses: actions/checkout@v6
 
@@ -63,11 +73,20 @@ jobs:
 
       - name: Version
         id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "version=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && -n "$INPUT_VERSION" ]]; then
+            [[ "$INPUT_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version must look like v1.2.3"; exit 1; }
+            [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::manual releases must run on main"; exit 1; }
+            echo "version=$INPUT_VERSION" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
           else
             echo "version=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build release binaries
@@ -113,7 +132,7 @@ jobs:
   publish:
     name: publish GitHub Release
     needs: build-macos-arm64
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: needs.build-macos-arm64.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -167,8 +186,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build-macos-arm64.outputs.version }}
         run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag_flag=(--verify-tag)              # tag already pushed
+          else
+            tag_flag=(--target "$GITHUB_SHA")    # manual run: tag the built commit
+          fi
           gh release create "$VERSION" dist/*.tar.gz dist/SHA256SUMS \
             --repo "${{ github.repository }}" \
             --title "$VERSION (macOS Apple Silicon)" \
             --notes-file notes.md \
-            --verify-tag
+            "${tag_flag[@]}"

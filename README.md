@@ -151,7 +151,9 @@ The pipeline is only as strong as its merge rules. On GitHub, protect `main`:
 
 ## Releases (macOS Apple Silicon)
 
-Push a tag `vX.Y.Z` on `main`. `.github/workflows/release.yml` then runs on an
+Push a tag `vX.Y.Z` on `main`, or run the `release` workflow manually on
+`main` with input `version: vX.Y.Z` (it then creates the tag itself).
+`.github/workflows/release.yml` runs on an
 Apple Silicon runner (`macos-15`):
 
 1. the full gate (`tools/test_vc.py`, `scripts/verify.sh`) on that same machine;
