@@ -15,7 +15,8 @@ enforces that:
     Everything else is the frozen spec. Its SHA-256 (with region contents
     removed), the kata Cargo.toml, and the intent document are pinned in
     specs.lock.json. Every .rs file of a kata (src/ and tests/) is locked and
-    scanned; any other file (build.rs, ...) is rejected.
+    scanned; top-level *.md docs are allowed (never compiled, not locked); any
+    other file (build.rs, ...) is rejected.
   * Escape hatches that make Verus trust instead of check (assume, admit,
     external_body, axioms, ...) are rejected everywhere, except the canonical
     pending stubs `assume(false); unreached()` (exec fn) and `assume(false);`
@@ -282,10 +283,11 @@ def check_kata(k: Kata, lock: dict) -> list[str]:
     for f in k.files():
         parts = f.relative_to(k.dir).parts
         allowed = parts == ("Cargo.toml",) or (
-            parts[0] in ("src", "tests") and f.suffix == ".rs")
+            parts[0] in ("src", "tests") and f.suffix == ".rs") or (
+            len(parts) == 1 and f.suffix == ".md")  # docs: not compiled, not locked
         if not allowed:
-            problems.append(f"{rel(f)}: only Cargo.toml, src/**/*.rs and tests/**/*.rs may live in a kata "
-                            "(build scripts and other files would escape the spec lock)")
+            problems.append(f"{rel(f)}: only Cargo.toml, src/**/*.rs, tests/**/*.rs and top-level *.md may live "
+                            "in a kata (build scripts and other files would escape the spec lock)")
     sources = k.sources()
     if not sources:
         problems.append(f"katas/{k.name}: no Rust sources")
