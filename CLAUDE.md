@@ -28,7 +28,8 @@ proof together, and never lock a spec the human has not approved.
 2. **No escape hatches**: `assume`, `admit`, `#[verifier::external*]`,
    `assume_specification`, `axiom`, `exec_allows_no_decreases_clause`,
    `assume_termination`, `unsafe`, `cfg` tricks. The only allowed `assume` is
-   the canonical pending stub `assume(false); unreached()`.
+   a canonical pending stub as the whole `<vc-code>` body:
+   `assume(false); unreached()` (exec fn) or `assume(false);` (proof fn).
 3. **A failing proof is information, not an obstacle.** If the spec looks
    wrong or unprovable, stop and report a counterexample. Don't work around it.
 4. **`// <vc-shell>` (only in `src/main.rs`) is trusted, unverified code.**

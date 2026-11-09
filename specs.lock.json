@@ -22,6 +22,18 @@
         "katas/0002-ls/src/main.rs": "f6828a37db98d491bb86e75a2261171cfc86e2e73acd31b8f929d3fbe7732424",
         "katas/0002-ls/tests/diff_ls.rs": "f542975849ddb1b42948780df974cfbc523f6cb1166aa918a3b5ccb9fd3be09e"
       }
+    },
+    "0003-count-files": {
+      "intent": {
+        "path": "intents/0003-count-files.md",
+        "sha256": "b7d5f3a763ea1744ee330cec3d4c6f3e83f792a0d5f057065b6258b2bbab1064"
+      },
+      "files": {
+        "katas/0003-count-files/Cargo.toml": "91d0ec92f4598e58308006e05d79b21b976d14731f9dcd6652b6794c44ff599e",
+        "katas/0003-count-files/src/lib.rs": "8ddf95029c21c93334426c8939ce247c3643688e1bd947896d622291e9f911d1",
+        "katas/0003-count-files/src/main.rs": "f5cb069a7e3b5930225333e5d89434df06f3832e6886d4feb01d340a85282438",
+        "katas/0003-count-files/tests/pipeline.rs": "783da7544b6744a1392cf06a5708198cbfba10a1b804b7cbfd3473abd658346c"
+      }
     }
   }
 }

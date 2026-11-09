@@ -1,0 +1,23 @@
+[package]
+name = "count_files"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "count_files"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vwc"
+path = "src/main.rs"
+
+[dependencies]
+vstd.workspace = true
+ls = { path = "../0002-ls" }
+
+[package.metadata.verus]
+verify = true
+
+[lints]
+workspace = true

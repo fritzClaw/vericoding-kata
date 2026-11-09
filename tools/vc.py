@@ -18,7 +18,8 @@ enforces that:
     scanned; any other file (build.rs, ...) is rejected.
   * Escape hatches that make Verus trust instead of check (assume, admit,
     external_body, axioms, ...) are rejected everywhere, except the canonical
-    pending stub `assume(false); unreached()` in a <vc-code> region.
+    pending stubs `assume(false); unreached()` (exec fn) and `assume(false);`
+    (proof fn) as the whole body of a <vc-code> region.
 
 Commands:
   vc.py new NNNN-name      scaffold intents/NNNN-name.md and katas/NNNN-name/
@@ -46,7 +47,8 @@ TOOLCHAIN_ENV = ROOT / "verus-toolchain.env"
 REGION_OPEN = re.compile(r"^\s*//\s*<vc-(helpers|code|shell)>\s*$")
 REGION_CLOSE = re.compile(r"^\s*//\s*</vc-(helpers|code|shell)>\s*$")
 KATA_NAME = re.compile(r"^\d{4}-[a-z0-9]+(-[a-z0-9]+)*$")
-STUB = "assume(false);\nunreached()"
+# Canonical pending stubs: exec fn body, and proof fn (theorem) body.
+STUBS = ("assume(false);\nunreached()", "assume(false);")
 
 # (pattern, reason). Applied to code with comments and string literals removed.
 FORBIDDEN_EVERYWHERE = [
@@ -207,7 +209,7 @@ class Kata:
     def status(self) -> str:
         for src in self.sources():
             for r in parse_source(src).regions:
-                if r.kind == "code" and r.body == STUB:
+                if r.kind == "code" and r.body in STUBS:
                     return "pending"
         return "implemented"
 
@@ -259,7 +261,7 @@ def scan(src: Source) -> list[str]:
     for r in src.regions:
         if r.kind == "shell" and not is_main:
             problems.append(f"{rel(src.path)}:{r.start}: <vc-shell> is only allowed in src/main.rs")
-        if r.kind == "code" and r.body == STUB:
+        if r.kind == "code" and r.body in STUBS:
             continue  # canonical pending stub
         lines = [(r.start + 1 + i, l) for i, l in enumerate(r.lines)]
         run(lines, FORBIDDEN_EVERYWHERE + FORBIDDEN_IN_REGIONS, f"<vc-{r.kind}>")
