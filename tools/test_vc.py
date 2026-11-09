@@ -211,6 +211,15 @@ class VcCheckTest(unittest.TestCase):
         (self.tmp / KATA / "build.rs").write_text("fn main() {}\n")
         self.assertRejected("build scripts")
 
+    def test_top_level_markdown_allowed(self):
+        (self.tmp / KATA / "NOTES.md").write_text("# notes\n")
+        r = self.check()
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_markdown_in_src_rejected(self):
+        (self.tmp / KATA / "src/notes.md").write_text("# notes\n")
+        self.assertRejected("top-level *.md")
+
     def test_unlocked_test_file(self):
         (self.tmp / KATA / "tests").mkdir()
         (self.tmp / KATA / "tests/t.rs").write_text("#[test] fn t() {}\n")

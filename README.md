@@ -91,8 +91,9 @@ like any spec.
 1. `tools/vc.py check`
    - the frozen spec, kata manifest, and intent match `specs.lock.json`
      (changed intent ⇒ spec must be re-reviewed);
-   - every `.rs` file of a kata (`src/` and `tests/`) is locked; no other
-     files (e.g. `build.rs`) may exist in a kata; every kata has
+   - every `.rs` file of a kata (`src/` and `tests/`) is locked; besides
+     top-level `*.md` notes (never compiled, not locked), no other files
+     (e.g. `build.rs`) may exist in a kata; every kata has
      `verify = true`; the workspace includes every kata;
    - no escape hatches anywhere (`assume`, `admit`, `external*`,
      `assume_specification`, `axiom`, `exec_allows_no_decreases_clause`,
