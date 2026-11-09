@@ -14,11 +14,11 @@
     "0002-ls": {
       "intent": {
         "path": "intents/0002-ls.md",
-        "sha256": "60e7d2add3157844072ef4141e1189a1c4e70186d4dc7ae629347703ee2d06bb"
+        "sha256": "e36cffae152ecfcc051897dfe7034426b2273fc87a371ded36f55dafbe2e23c7"
       },
       "files": {
         "katas/0002-ls/Cargo.toml": "7613de24e81ba8f5159b3fe88ee6631398ca6fcf4a50015b68453ef38666a996",
-        "katas/0002-ls/src/lib.rs": "dda2547da83c360e1a5ede1fddcf2ca4422040185c42dae731d3e490668800f6",
+        "katas/0002-ls/src/lib.rs": "8d24bbed3f7a6a4886643cd8f18df1d7cf376d5e1c7ee3f541d1c22b9c4d95e5",
         "katas/0002-ls/src/main.rs": "f6828a37db98d491bb86e75a2261171cfc86e2e73acd31b8f929d3fbe7732424",
         "katas/0002-ls/tests/diff_ls.rs": "f542975849ddb1b42948780df974cfbc523f6cb1166aa918a3b5ccb9fd3be09e"
       }
