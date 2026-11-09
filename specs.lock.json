@@ -30,7 +30,7 @@
       },
       "files": {
         "katas/0003-count-files/Cargo.toml": "91d0ec92f4598e58308006e05d79b21b976d14731f9dcd6652b6794c44ff599e",
-        "katas/0003-count-files/src/lib.rs": "8ddf95029c21c93334426c8939ce247c3643688e1bd947896d622291e9f911d1",
+        "katas/0003-count-files/src/lib.rs": "dfbb94dec0c72c9bc022fdfccbaee2d7352f990d5d1ad7d6cd476c601a3c989c",
         "katas/0003-count-files/src/main.rs": "f5cb069a7e3b5930225333e5d89434df06f3832e6886d4feb01d340a85282438",
         "katas/0003-count-files/tests/pipeline.rs": "783da7544b6744a1392cf06a5708198cbfba10a1b804b7cbfd3473abd658346c"
       }

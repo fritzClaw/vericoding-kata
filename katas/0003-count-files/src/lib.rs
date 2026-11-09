@@ -7,6 +7,8 @@
 //! frozen statements; their proofs are `<vc-code>` regions.
 #![forbid(unsafe_code)]
 
+// Ghost items only: erased in normal builds (Verus guide, "Ghost Erasure").
+#[cfg(verus_only)]
 use ls::{
     OperandS, OutcomeS, RequestS, dir_ops, entries_of, escape, escape_all, file_ops, headers_on,
     join_groups, lines_view, listed_names, ls, op_names, sort_ops, sort_unique,
