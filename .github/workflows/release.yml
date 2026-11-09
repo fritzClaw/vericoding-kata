@@ -20,8 +20,11 @@ permissions:
 jobs:
   build-macos-arm64:
     name: gate + build (macOS arm64)
-    runs-on: macos-14  # Apple Silicon
+    runs-on: macos-15  # Apple Silicon
     timeout-minutes: 60
+    env:
+      # Runs on every Apple Silicon Mac with macOS 11+, whatever the runner's macOS.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:

@@ -151,7 +151,7 @@ The pipeline is only as strong as its merge rules. On GitHub, protect `main`:
 ## Releases (macOS Apple Silicon)
 
 Push a tag `vX.Y.Z` on `main`. `.github/workflows/release.yml` then runs on an
-Apple Silicon runner (`macos-14`):
+Apple Silicon runner (`macos-15`):
 
 1. the full gate (`tools/test_vc.py`, `scripts/verify.sh`) on that same machine;
 2. `cargo build --release` for every binary target in the workspace;
