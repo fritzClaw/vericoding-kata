@@ -666,6 +666,9 @@ fn push_escape_byte(out: &mut Vec<u8>, b: u8)
     } else if b == 9 {
         out.push(92);
         out.push(116);
+    } else if b == 58 {
+        out.push(92);
+        out.push(58);
     } else if 32 <= b && b <= 126 {
         out.push(b);
     } else {
