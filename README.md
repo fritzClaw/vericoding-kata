@@ -148,6 +148,21 @@ The pipeline is only as strong as its merge rules. On GitHub, protect `main`:
   Then any PR that touches `specs.lock.json`, `intents/`, or the gate itself
   needs your approval. Pure vericode PRs only need a green build.
 
+## Releases (macOS Apple Silicon)
+
+Push a tag `vX.Y.Z` on `main`. `.github/workflows/release.yml` then runs on an
+Apple Silicon runner (`macos-15`):
+
+1. the full gate (`tools/test_vc.py`, `scripts/verify.sh`) on that same machine;
+2. `cargo build --release` for every binary target in the workspace;
+3. ad-hoc signing, an arm64 check and a smoke test;
+4. a GitHub Release with `vericoding-kata-vX.Y.Z-aarch64-apple-darwin.tar.gz`
+   and `SHA256SUMS`, plus install notes.
+
+The binaries are not notarized. A browser download is quarantined by
+Gatekeeper; `xattr -d com.apple.quarantine <binary>` clears it. PRs that
+touch the workflow run it as a dry run (build + artifact, no release).
+
 ## Upgrading Verus
 
 Pick a release, then copy `verus`/`vstd` from

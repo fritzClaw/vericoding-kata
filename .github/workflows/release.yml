@@ -1,0 +1,174 @@
+name: release
+
+# Tag `vX.Y.Z` on main to publish a GitHub Release with every binary of the
+# workspace, built for Apple Silicon (aarch64-apple-darwin, e.g. Mac M1).
+# Nothing is published unless the full gate passes on that same machine.
+# On PRs touching this workflow it runs as a dry run (build + artifact only).
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "scripts/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos-arm64:
+    name: gate + build (macOS arm64)
+    runs-on: macos-15  # Apple Silicon
+    timeout-minutes: 60
+    env:
+      # Runs on every Apple Silicon Mac with macOS 11+, whatever the runner's macOS.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache Verus release
+        uses: actions/cache@v4
+        with:
+          path: ~/.verus
+          key: verus-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('verus-toolchain.env') }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('verus-toolchain.env', 'Cargo.lock') }}-${{ hashFiles('katas/**') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('verus-toolchain.env', 'Cargo.lock') }}-
+
+      - name: Install Verus (arm64-macos)
+        run: |
+          scripts/install-verus.sh
+          scripts/install-verus.sh --print-env | sed -E 's/^export PATH="([^:]*):.*/\1/' >> "$GITHUB_PATH"
+
+      - name: Gate (scripts/verify.sh)
+        run: |
+          python3 -m unittest discover -s tools
+          scripts/verify.sh
+
+      - name: Version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build release binaries
+        run: cargo build --release --locked --workspace --bins
+
+      - name: Sign, check and package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          bins=$(cargo metadata --no-deps --format-version 1 | python3 -c '
+          import json, sys
+          for p in json.load(sys.stdin)["packages"]:
+              for t in p["targets"]:
+                  if "bin" in t["kind"]:
+                      print(t["name"])')
+          [ -n "$bins" ] || { echo "no binary targets"; exit 1; }
+          pkg="vericoding-kata-$VERSION-aarch64-apple-darwin"
+          mkdir -p "dist/$pkg"
+          for b in $bins; do
+            cp "target/release/$b" "dist/$pkg/$b"
+            codesign --force --sign - "dist/$pkg/$b"   # ad-hoc signature
+            codesign --verify --verbose "dist/$pkg/$b"
+            [ "$(lipo -archs "dist/$pkg/$b")" = "arm64" ] || { echo "$b is not arm64"; exit 1; }
+          done
+          if [ -x "dist/$pkg/vls" ]; then   # smoke test
+            mkdir -p smoke/d && touch smoke/d/b smoke/d/a smoke/d/.h
+            [ "$(cd smoke && "../dist/$pkg/vls" d)" = "$(printf 'a\nb')" ]
+          fi
+          tar -czf "dist/$pkg.tar.gz" -C dist "$pkg"
+          (cd dist && shasum -a 256 "$pkg.tar.gz" > SHA256SUMS && cat SHA256SUMS)
+          echo "$bins" > dist/BINARIES
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/BINARIES
+          if-no-files-found: error
+
+  publish:
+    name: publish GitHub Release
+    needs: build-macos-arm64
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-arm64
+          path: dist
+
+      - name: Release notes
+        env:
+          VERSION: ${{ needs.build-macos-arm64.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          pkg="vericoding-kata-$VERSION-aarch64-apple-darwin"
+          {
+            echo "Binaries for **macOS on Apple Silicon** (M1 and later), \`aarch64-apple-darwin\`."
+            echo
+            echo "Every binary is built from code whose core is formally verified with Verus."
+            echo "The full gate (spec lock, Verus \`--no-cheating\`, tests) passed on the build machine."
+            echo
+            echo "## Binaries"
+            sed 's/^/- `/; s/$/`/' dist/BINARIES
+            echo
+            echo "## Katas"
+            python3 tools/vc.py status --markdown
+            echo
+            echo "## Install"
+            echo
+            echo '```sh'
+            echo "curl -LO https://github.com/$REPO/releases/download/$VERSION/$pkg.tar.gz"
+            echo "curl -LO https://github.com/$REPO/releases/download/$VERSION/SHA256SUMS"
+            echo "shasum -a 256 -c SHA256SUMS"
+            echo "tar -xzf $pkg.tar.gz"
+            echo "./$pkg/vls -a"
+            echo '```'
+            echo
+            echo "The binaries are ad-hoc signed, not notarized. Files downloaded with a browser are"
+            echo "quarantined by Gatekeeper (\"cannot verify the developer\"). Remove the flag once:"
+            echo
+            echo '```sh'
+            echo "xattr -d com.apple.quarantine $pkg/*"
+            echo '```'
+          } > notes.md
+          cat notes.md
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build-macos-arm64.outputs.version }}
+        run: |
+          gh release create "$VERSION" dist/*.tar.gz dist/SHA256SUMS \
+            --repo "${{ github.repository }}" \
+            --title "$VERSION (macOS Apple Silicon)" \
+            --notes-file notes.md \
+            --verify-tag
