@@ -344,22 +344,29 @@ impl EscapeFamily for BackslashEscape {
 
     fn esc_exec() -> (r: u8) {
         // <vc-code>
-        assume(false);
-        unreached()
+        92u8
         // </vc-code>
     }
 
     fn literal_exec(b: u8) -> (r: bool) {
         // <vc-code>
-        assume(false);
-        unreached()
+        32 <= b && b <= 126 && b != 92 && b != 58
         // </vc-code>
     }
 
     fn short_exec(b: u8) -> (r: Option<u8>) {
         // <vc-code>
-        assume(false);
-        unreached()
+        if b == 92 {
+            Some(92u8)
+        } else if b == 10 {
+            Some(110u8)
+        } else if b == 9 {
+            Some(116u8)
+        } else if b == 58 {
+            Some(58u8)
+        } else {
+            None
+        }
         // </vc-code>
     }
 }
@@ -394,33 +401,1377 @@ impl Codec for BackslashEscape {
 
     fn delim_exec() -> (r: u8) {
         // <vc-code>
-        assume(false);
-        unreached()
+        10u8
         // </vc-code>
     }
 
     fn marker_exec() -> (r: u8) {
         // <vc-code>
-        assume(false);
-        unreached()
+        58u8
         // </vc-code>
     }
 
     fn push_code(out: &mut Vec<u8>, b: u8) {
         // <vc-code>
-        assume(false);
-        unreached()
+        family_push_code::<BackslashEscape>(out, b);
         // </vc-code>
     }
 
     proof fn lemma_codec_ok() {
         // <vc-code>
-        assume(false);
+        let esc = BackslashEscape::esc();
+        let literal = |x: u8| BackslashEscape::literal(x);
+        let short = |x: u8| BackslashEscape::short(x);
+        let short_inv = |s: u8| backslash_short_inv(s);
+        assert(family_conditions(esc, literal, short, short_inv, 10, 58)) by {
+            assert forall|b: u8| #[trigger] literal(b) implies b != esc && b != 10 && b != 58 by {}
+            assert forall|b: u8|
+                ((#[trigger] short(b)) matches Some(s) ==> !literal(b) && s != 120 && s != 10 && short_inv(s) == Some(b)) by {}
+        }
+        lemma_family_codec_ok(|b: u8| BackslashEscape::code(b), esc, literal, short, short_inv, 10, 58);
         // </vc-code>
     }
 }
 
 // <vc-helpers>
+
+// ===== part 1: conditions, counting, encoders ================================
+
+/// codec_ok in direct (non-closure) form.
+proof fn lemma_ok<C: Codec>()
+    requires
+        codec_ok::<C>(),
+    ensures
+        C::delim() != C::marker(),
+        forall|b: u8| (#[trigger] C::code(b)).len() > 0,
+        forall|b: u8, i: int| 0 <= i < C::code(b).len() ==> (#[trigger] C::code(b)[i]) != C::delim(),
+        forall|b: u8, c: u8| b != c ==> !is_prefix(#[trigger] C::code(b), #[trigger] C::code(c)),
+        forall|b: u8| (#[trigger] C::code(b))[0] != C::marker(),
+{
+    let f = |b: u8| C::code(b);
+    assert forall|b: u8| (#[trigger] C::code(b)).len() > 0 by {
+        assert(f(b) == C::code(b));
+    }
+    assert forall|b: u8, i: int| 0 <= i < C::code(b).len() implies (#[trigger] C::code(b)[i]) != C::delim() by {
+        assert(f(b) == C::code(b));
+        assert(f(b)[i] != C::delim());
+    }
+    assert forall|b: u8, c: u8| b != c implies !is_prefix(#[trigger] C::code(b), #[trigger] C::code(c)) by {
+        assert(f(b) == C::code(b) && f(c) == C::code(c));
+        assert(!is_prefix(f(b), f(c)));
+    }
+    assert forall|b: u8| (#[trigger] C::code(b))[0] != C::marker() by {
+        assert(f(b) == C::code(b));
+        assert(f(b)[0] != C::marker());
+    }
+}
+
+proof fn lemma_count_concat(a: Seq<u8>, b: Seq<u8>, d: u8)
+    ensures
+        count_byte(a + b, d) == count_byte(a, d) + count_byte(b, d),
+    decreases a.len(),
+{
+    if a.len() > 0 {
+        let t = a.subrange(1, a.len() as int);
+        lemma_count_concat(t, b, d);
+        assert((a + b).subrange(1, (a + b).len() as int) =~= t + b);
+        assert((a + b)[0] == a[0]);
+    } else {
+        assert(a + b =~= b);
+    }
+}
+
+pub open spec fn no_byte(s: Seq<u8>, d: u8) -> bool {
+    forall|i: int| 0 <= i < s.len() ==> s[i] != d
+}
+
+proof fn lemma_count_zero(s: Seq<u8>, d: u8)
+    requires
+        no_byte(s, d),
+    ensures
+        count_byte(s, d) == 0,
+    decreases s.len(),
+{
+    if s.len() > 0 {
+        let t = s.subrange(1, s.len() as int);
+        assert forall|i: int| 0 <= i < t.len() implies t[i] != d by {
+            assert(t[i] == s[i + 1]);
+        }
+        lemma_count_zero(t, d);
+    }
+}
+
+proof fn lemma_encode_no_delim<C: Codec>(s: Seq<u8>)
+    requires
+        codec_ok::<C>(),
+    ensures
+        no_byte(encode::<C>(s), C::delim()),
+        s.len() > 0 ==> encode::<C>(s).len() > 0,
+    decreases s.len(),
+{
+    lemma_ok::<C>();
+    if s.len() > 0 {
+        let t = s.subrange(1, s.len() as int);
+        lemma_encode_no_delim::<C>(t);
+        let e = encode::<C>(s);
+        let h = C::code(s[0]);
+        assert(e == h + encode::<C>(t));
+        assert forall|i: int| 0 <= i < e.len() implies e[i] != C::delim() by {
+            if i < h.len() {
+                assert(e[i] == h[i]);
+            } else {
+                assert(e[i] == encode::<C>(t)[i - h.len()]);
+            }
+        }
+    }
+}
+
+proof fn lemma_encode_all_index<C: Codec>(xs: Seq<Seq<u8>>)
+    ensures
+        encode_all::<C>(xs).len() == xs.len(),
+        forall|i: int| 0 <= i < xs.len() ==> #[trigger] encode_all::<C>(xs)[i] == encode::<C>(xs[i]),
+    decreases xs.len(),
+{
+    if xs.len() > 0 {
+        let t = xs.subrange(1, xs.len() as int);
+        lemma_encode_all_index::<C>(t);
+        assert forall|i: int| 0 <= i < xs.len() implies #[trigger] encode_all::<C>(xs)[i] == encode::<C>(xs[i]) by {
+            if i > 0 {
+                assert(t[i - 1] == xs[i]);
+            }
+        }
+    }
+}
+
+proof fn lemma_count_lines<C: Codec>(lines: Seq<Seq<u8>>)
+    requires
+        forall|k: int| 0 <= k < lines.len() ==> no_byte(#[trigger] lines[k], C::delim()),
+    ensures
+        count_byte(unparse_lines::<C>(lines), C::delim()) == lines.len(),
+    decreases lines.len(),
+{
+    if lines.len() > 0 {
+        let d = C::delim();
+        let t = lines.subrange(1, lines.len() as int);
+        assert forall|k: int| 0 <= k < t.len() implies no_byte(#[trigger] t[k], d) by {
+            assert(t[k] == lines[k + 1]);
+        }
+        lemma_count_lines::<C>(t);
+        assert(no_byte(lines[0], d));
+        lemma_count_zero(lines[0], d);
+        lemma_count_concat(lines[0] + seq![d], unparse_lines::<C>(t), d);
+        lemma_count_concat(lines[0], seq![d], d);
+        assert(count_byte(seq![d], d) == 1) by {
+            assert(seq![d].subrange(1, 1) =~= Seq::<u8>::empty());
+            assert(count_byte(Seq::<u8>::empty(), d) == 0);
+        }
+    }
+}
+
+proof fn lemma_record_count<C: Codec>(rs: Seq<Seq<u8>>)
+    requires
+        codec_ok::<C>(),
+    ensures
+        count_byte(unparse_records::<C>(rs), C::delim()) == rs.len(),
+{
+    let lines = encode_all::<C>(rs);
+    lemma_encode_all_index::<C>(rs);
+    assert forall|k: int| 0 <= k < lines.len() implies no_byte(#[trigger] lines[k], C::delim()) by {
+        lemma_encode_no_delim::<C>(rs[k]);
+    }
+    lemma_count_lines::<C>(lines);
+}
+
+// ---- escape family ----
+
+proof fn lemma_hex_digit(d: u8)
+    requires
+        d < 16,
+    ensures
+        is_hex_char(hex_digit(d)),
+        hex_digit(d) != 120,
+{
+}
+
+proof fn lemma_hex_digit_injective(a: u8, b: u8)
+    requires
+        a < 16,
+        b < 16,
+        hex_digit(a) == hex_digit(b),
+    ensures
+        a == b,
+{
+}
+
+proof fn lemma_div_mod_16(b: u8, c: u8)
+    requires
+        b / 16 == c / 16,
+        b % 16 == c % 16,
+    ensures
+        b == c,
+{
+    assert(b == 16 * (b / 16) + b % 16) by (nonlinear_arith);
+    assert(c == 16 * (c / 16) + c % 16) by (nonlinear_arith);
+}
+
+proof fn lemma_family_codec_ok(
+    code: spec_fn(u8) -> Seq<u8>,
+    esc: u8,
+    literal: spec_fn(u8) -> bool,
+    short: spec_fn(u8) -> Option<u8>,
+    short_inv: spec_fn(u8) -> Option<u8>,
+    d: u8,
+    m: u8,
+)
+    requires
+        family_conditions(esc, literal, short, short_inv, d, m),
+        forall|b: u8| #[trigger] code(b) == family_code(esc, literal, short, b),
+    ensures
+        codec_conditions(code, d, m),
+{
+    assert forall|b: u8| (#[trigger] code(b)).len() > 0 by {
+        assert(code(b) == family_code(esc, literal, short, b));
+    }
+    assert forall|b: u8, i: int| 0 <= i < code(b).len() implies (#[trigger] code(b)[i]) != d by {
+        assert(code(b) == family_code(esc, literal, short, b));
+        if !literal(b) && short(b) is None {
+            lemma_hex_digit(b / 16);
+            lemma_hex_digit(b % 16);
+        }
+    }
+    assert forall|b: u8| (#[trigger] code(b))[0] != m by {
+        assert(code(b) == family_code(esc, literal, short, b));
+    }
+    assert forall|b: u8, c: u8| b != c implies !is_prefix(#[trigger] code(b), #[trigger] code(c)) by {
+        let x = code(b);
+        let y = code(c);
+        assert(x == family_code(esc, literal, short, b));
+        assert(y == family_code(esc, literal, short, c));
+        if is_prefix(x, y) {
+            assert(y.subrange(0, x.len() as int) == x);
+            assert(y[0] == x[0]);
+            if literal(b) {
+                if literal(c) {
+                    assert(b == c);
+                } else {
+                    assert(y[0] == esc);
+                }
+            } else if let Some(s) = short(b) {
+                assert(x.len() == 2 && y.len() >= 2);
+                assert(y[1] == x[1]);
+                assert(!literal(c));
+                if let Some(s2) = short(c) {
+                    assert(s == s2);
+                    assert(short_inv(s) == Some(b) && short_inv(s2) == Some(c));
+                } else {
+                    assert(y[1] == 120u8);
+                }
+            } else {
+                assert(x.len() == 4 && y.len() >= 4);
+                assert(!literal(c) && short(c) is None);
+                assert(y[2] == x[2] && y[3] == x[3]);
+                lemma_hex_digit_injective(b / 16, c / 16);
+                lemma_hex_digit_injective(b % 16, c % 16);
+                lemma_div_mod_16(b, c);
+            }
+        }
+    }
+}
+
+// ===== part 2: the generic parser (spec) =====================================
+
+// ---- split into lines (byte fold) ----
+pub struct SplitS {
+    pub lines: Seq<Seq<u8>>,
+    pub cur: Seq<u8>,
+}
+
+pub open spec fn split_init() -> SplitS {
+    SplitS { lines: seq![], cur: seq![] }
+}
+
+pub open spec fn split_step(st: SplitS, b: u8, d: u8) -> SplitS {
+    if b == d {
+        SplitS { lines: st.lines.push(st.cur), cur: seq![] }
+    } else {
+        SplitS { lines: st.lines, cur: st.cur.push(b) }
+    }
+}
+
+pub open spec fn split_run(st: SplitS, s: Seq<u8>, d: u8) -> SplitS
+    decreases s.len(),
+{
+    if s.len() == 0 {
+        st
+    } else {
+        split_step(split_run(st, s.subrange(0, s.len() - 1), d), s[s.len() - 1], d)
+    }
+}
+
+pub open spec fn split_lines(s: Seq<u8>, d: u8) -> Option<Seq<Seq<u8>>> {
+    let st = split_run(split_init(), s, d);
+    if st.cur.len() == 0 {
+        Some(st.lines)
+    } else {
+        None
+    }
+}
+
+proof fn lemma_split_run_add(st: SplitS, a: Seq<u8>, b: Seq<u8>, d: u8)
+    ensures
+        split_run(st, a + b, d) == split_run(split_run(st, a, d), b, d),
+    decreases b.len(),
+{
+    if b.len() == 0 {
+        assert(a + b =~= a);
+    } else {
+        let bp = b.subrange(0, b.len() - 1);
+        lemma_split_run_add(st, a, bp, d);
+        assert((a + b).subrange(0, (a + b).len() - 1) =~= a + bp);
+        assert((a + b)[(a + b).len() - 1] == b[b.len() - 1]);
+    }
+}
+
+proof fn lemma_split_run_plain(st: SplitS, l: Seq<u8>, d: u8)
+    requires
+        no_byte(l, d),
+    ensures
+        split_run(st, l, d) == (SplitS { lines: st.lines, cur: st.cur + l }),
+    decreases l.len(),
+{
+    if l.len() == 0 {
+        assert(st.cur + l =~= st.cur);
+    } else {
+        let lp = l.subrange(0, l.len() - 1);
+        assert(no_byte(lp, d)) by {
+            assert forall|i: int| 0 <= i < lp.len() implies lp[i] != d by {
+                assert(lp[i] == l[i]);
+            }
+        }
+        lemma_split_run_plain(st, lp, d);
+        assert(l[l.len() - 1] != d);
+        assert((st.cur + lp).push(l[l.len() - 1]) =~= st.cur + l);
+    }
+}
+
+proof fn lemma_split_unparse<C: Codec>(ls0: Seq<Seq<u8>>, lines: Seq<Seq<u8>>)
+    requires
+        forall|k: int| 0 <= k < lines.len() ==> no_byte(#[trigger] lines[k], C::delim()),
+    ensures
+        split_run(SplitS { lines: ls0, cur: seq![] }, unparse_lines::<C>(lines), C::delim()) == (SplitS {
+            lines: ls0 + lines,
+            cur: seq![],
+        }),
+    decreases lines.len(),
+{
+    let d = C::delim();
+    let st = SplitS { lines: ls0, cur: seq![] };
+    if lines.len() == 0 {
+        assert(ls0 + lines =~= ls0);
+    } else {
+        let t = lines.subrange(1, lines.len() as int);
+        assert forall|k: int| 0 <= k < t.len() implies no_byte(#[trigger] t[k], d) by {
+            assert(t[k] == lines[k + 1]);
+        }
+        let l0 = lines[0];
+        assert(no_byte(l0, d));
+        lemma_split_run_add(st, l0 + seq![d], unparse_lines::<C>(t), d);
+        lemma_split_run_add(st, l0, seq![d], d);
+        lemma_split_run_plain(st, l0, d);
+        let s1 = split_run(st, l0, d);
+        assert(s1.cur =~= l0);
+        assert(seq![d].subrange(0, 0) =~= Seq::<u8>::empty());
+        assert(split_run(s1, Seq::<u8>::empty(), d) == s1);
+        assert(split_run(s1, seq![d], d) == split_step(s1, d, d));
+        lemma_split_unparse::<C>(ls0.push(l0), t);
+        assert(ls0.push(l0) + t =~= ls0 + lines);
+    }
+}
+
+proof fn lemma_unparse_lines_push<C: Codec>(lines: Seq<Seq<u8>>, l: Seq<u8>)
+    ensures
+        unparse_lines::<C>(lines.push(l)) == unparse_lines::<C>(lines) + l + seq![C::delim()],
+    decreases lines.len(),
+{
+    if lines.len() == 0 {
+        assert(lines.push(l).subrange(1, 1) =~= Seq::<Seq<u8>>::empty());
+        assert(unparse_lines::<C>(Seq::<Seq<u8>>::empty()) == Seq::<u8>::empty());
+        assert(unparse_lines::<C>(lines.push(l)) =~= unparse_lines::<C>(lines) + l + seq![C::delim()]);
+    } else {
+        let t = lines.subrange(1, lines.len() as int);
+        lemma_unparse_lines_push::<C>(t, l);
+        assert(lines.push(l).subrange(1, lines.len() as int + 1) =~= t.push(l));
+        assert(unparse_lines::<C>(lines.push(l)) =~= unparse_lines::<C>(lines) + l + seq![C::delim()]);
+    }
+}
+
+proof fn lemma_split_reverse<C: Codec>(s: Seq<u8>)
+    ensures
+        s == unparse_lines::<C>(split_run(split_init(), s, C::delim()).lines) + split_run(
+            split_init(),
+            s,
+            C::delim(),
+        ).cur,
+    decreases s.len(),
+{
+    let d = C::delim();
+    if s.len() == 0 {
+        assert(unparse_lines::<C>(Seq::<Seq<u8>>::empty()) == Seq::<u8>::empty());
+        assert(s =~= unparse_lines::<C>(Seq::<Seq<u8>>::empty()) + Seq::<u8>::empty());
+    } else {
+        let p = s.subrange(0, s.len() - 1);
+        let b = s[s.len() - 1];
+        lemma_split_reverse::<C>(p);
+        let st = split_run(split_init(), p, d);
+        assert(s =~= p.push(b));
+        if b == d {
+            lemma_unparse_lines_push::<C>(st.lines, st.cur);
+            assert(s =~= unparse_lines::<C>(st.lines.push(st.cur)) + Seq::<u8>::empty());
+        } else {
+            assert(s =~= unparse_lines::<C>(st.lines) + st.cur.push(b));
+        }
+    }
+}
+
+// ---- tokens and lines ----
+
+/// The byte whose code starts `l` (unique when codec_ok holds, by C3).
+pub open spec fn token<C: Codec>(l: Seq<u8>) -> Option<(u8, nat)> {
+    if exists|b: u8| is_prefix(C::code(b), l) {
+        let b = choose|b: u8| is_prefix(C::code(b), l);
+        Some((b, C::code(b).len()))
+    } else {
+        None
+    }
+}
+
+proof fn lemma_prefix_unique<C: Codec>(b: u8, c: u8, l: Seq<u8>)
+    requires
+        codec_ok::<C>(),
+        is_prefix(C::code(b), l),
+        is_prefix(C::code(c), l),
+    ensures
+        b == c,
+{
+    lemma_ok::<C>();
+    let (x, y) = (C::code(b), C::code(c));
+    if b != c {
+        if x.len() <= y.len() {
+            assert(y.subrange(0, x.len() as int) =~= l.subrange(0, x.len() as int));
+            assert(is_prefix(x, y));
+        } else {
+            assert(x.subrange(0, y.len() as int) =~= l.subrange(0, y.len() as int));
+            assert(is_prefix(y, x));
+        }
+    }
+}
+
+proof fn lemma_token_code<C: Codec>(b: u8, t: Seq<u8>)
+    requires
+        codec_ok::<C>(),
+    ensures
+        token::<C>(C::code(b) + t) == Some((b, C::code(b).len())),
+{
+    let l = C::code(b) + t;
+    assert(l.subrange(0, C::code(b).len() as int) =~= C::code(b));
+    assert(is_prefix(C::code(b), l));
+    let c = choose|c: u8| is_prefix(C::code(c), l);
+    lemma_prefix_unique::<C>(b, c, l);
+}
+
+proof fn lemma_token_shape<C: Codec>(l: Seq<u8>)
+    requires
+        codec_ok::<C>(),
+    ensures
+        token::<C>(l) matches Some((b, n)) ==> 0 < n <= l.len() && l.subrange(0, n as int) == C::code(b),
+{
+    lemma_ok::<C>();
+}
+
+pub open spec fn suffix<C: Codec>(header: bool) -> Seq<u8> {
+    if header {
+        seq![C::marker()]
+    } else {
+        seq![]
+    }
+}
+
+pub open spec fn dec_line<C: Codec>(l: Seq<u8>) -> Option<(Seq<u8>, bool)>
+    decreases l.len(),
+{
+    if l.len() == 0 {
+        Some((seq![], false))
+    } else if l.len() == 1 && l[0] == C::marker() {
+        Some((seq![], true))
+    } else {
+        match token::<C>(l) {
+            None => None,
+            Some((b, n)) => if 0 < n && n <= l.len() {
+                match dec_line::<C>(l.subrange(n as int, l.len() as int)) {
+                    None => None,
+                    Some((v, h)) => Some((seq![b] + v, h)),
+                }
+            } else {
+                None
+            },
+        }
+    }
+}
+
+proof fn lemma_dec_encode<C: Codec>(v: Seq<u8>, h: bool)
+    requires
+        codec_ok::<C>(),
+    ensures
+        dec_line::<C>(encode::<C>(v) + suffix::<C>(h)) == Some((v, h)),
+    decreases v.len(),
+{
+    lemma_ok::<C>();
+    if v.len() == 0 {
+        assert(encode::<C>(v) + suffix::<C>(h) =~= suffix::<C>(h));
+    } else {
+        let rest = v.subrange(1, v.len() as int);
+        let e = C::code(v[0]);
+        let l = encode::<C>(v) + suffix::<C>(h);
+        assert(l =~= e + (encode::<C>(rest) + suffix::<C>(h)));
+        lemma_token_code::<C>(v[0], encode::<C>(rest) + suffix::<C>(h));
+        if l.len() == 1 {
+            assert(l[0] == e[0]);
+        }
+        assert(l.subrange(e.len() as int, l.len() as int) =~= encode::<C>(rest) + suffix::<C>(h));
+        lemma_dec_encode::<C>(rest, h);
+        assert(seq![v[0]] + rest =~= v);
+    }
+}
+
+proof fn lemma_dec_reverse<C: Codec>(l: Seq<u8>)
+    requires
+        codec_ok::<C>(),
+    ensures
+        dec_line::<C>(l) matches Some((v, h)) ==> l == encode::<C>(v) + suffix::<C>(h),
+    decreases l.len(),
+{
+    if let Some((v, h)) = dec_line::<C>(l) {
+        if l.len() == 0 {
+            assert(encode::<C>(v) + suffix::<C>(h) =~= l);
+        } else if l.len() == 1 && l[0] == C::marker() {
+            assert(encode::<C>(v) + suffix::<C>(h) =~= l);
+        } else {
+            lemma_token_shape::<C>(l);
+            let (b, n) = token::<C>(l).unwrap();
+            let rest = l.subrange(n as int, l.len() as int);
+            lemma_dec_reverse::<C>(rest);
+            let (v2, h2) = dec_line::<C>(rest).unwrap();
+            assert(v == seq![b] + v2 && h == h2);
+            assert((seq![b] + v2).subrange(1, v.len() as int) =~= v2);
+            assert(encode::<C>(v) == C::code(b) + encode::<C>(v2));
+            assert(l =~= l.subrange(0, n as int) + rest);
+            assert(l =~= encode::<C>(v) + suffix::<C>(h));
+        }
+    }
+}
+
+// ---- records ----
+
+pub open spec fn dec_records<C: Codec>(lines: Seq<Seq<u8>>) -> Option<Seq<Seq<u8>>>
+    decreases lines.len(),
+{
+    if lines.len() == 0 {
+        Some(seq![])
+    } else {
+        match dec_line::<C>(lines[0]) {
+            Some((v, false)) => match dec_records::<C>(lines.subrange(1, lines.len() as int)) {
+                Some(vs) => Some(seq![v] + vs),
+                None => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+pub open spec fn parse_records<C: Codec>(s: Seq<u8>) -> Option<Seq<Seq<u8>>> {
+    match split_lines(s, C::delim()) {
+        Some(lines) => dec_records::<C>(lines),
+        None => None,
+    }
+}
+
+proof fn lemma_dec_records_encode<C: Codec>(xs: Seq<Seq<u8>>)
+    requires
+        codec_ok::<C>(),
+    ensures
+        dec_records::<C>(encode_all::<C>(xs)) == Some(xs),
+    decreases xs.len(),
+{
+    if xs.len() == 0 {
+        assert(encode_all::<C>(xs) =~= Seq::<Seq<u8>>::empty());
+        assert(xs =~= Seq::<Seq<u8>>::empty());
+    } else {
+        let t = xs.subrange(1, xs.len() as int);
+        lemma_dec_records_encode::<C>(t);
+        let ea = encode_all::<C>(xs);
+        assert(ea == seq![encode::<C>(xs[0])] + encode_all::<C>(t));
+        assert(ea.subrange(1, ea.len() as int) =~= encode_all::<C>(t));
+        lemma_dec_encode::<C>(xs[0], false);
+        assert(encode::<C>(xs[0]) + suffix::<C>(false) =~= encode::<C>(xs[0]));
+        assert(seq![xs[0]] + t =~= xs);
+    }
+}
+
+proof fn lemma_records_round_trip<C: Codec>(xs: Seq<Seq<u8>>)
+    requires
+        codec_ok::<C>(),
+    ensures
+        parse_records::<C>(unparse_records::<C>(xs)) == Some(xs),
+{
+    let lines = encode_all::<C>(xs);
+    lemma_encode_all_index::<C>(xs);
+    assert forall|k: int| 0 <= k < lines.len() implies no_byte(#[trigger] lines[k], C::delim()) by {
+        lemma_encode_no_delim::<C>(xs[k]);
+    }
+    lemma_split_unparse::<C>(Seq::<Seq<u8>>::empty(), lines);
+    assert(Seq::<Seq<u8>>::empty() + lines =~= lines);
+    assert(split_init() == (SplitS { lines: Seq::<Seq<u8>>::empty(), cur: Seq::<u8>::empty() }));
+    lemma_dec_records_encode::<C>(xs);
+}
+
+proof fn lemma_dec_records_reverse<C: Codec>(lines: Seq<Seq<u8>>)
+    requires
+        codec_ok::<C>(),
+    ensures
+        dec_records::<C>(lines) matches Some(xs) ==> lines == encode_all::<C>(xs),
+    decreases lines.len(),
+{
+    if let Some(xs) = dec_records::<C>(lines) {
+        if lines.len() == 0 {
+            assert(xs =~= Seq::<Seq<u8>>::empty());
+            assert(encode_all::<C>(xs) =~= lines);
+        } else {
+            let t = lines.subrange(1, lines.len() as int);
+            lemma_dec_records_reverse::<C>(t);
+            lemma_dec_reverse::<C>(lines[0]);
+            let (v, h) = dec_line::<C>(lines[0]).unwrap();
+            let vs = dec_records::<C>(t).unwrap();
+            assert(xs == seq![v] + vs);
+            assert(lines[0] =~= encode::<C>(v));
+            assert(xs.subrange(1, xs.len() as int) =~= vs);
+            assert(encode_all::<C>(xs) =~= lines);
+        }
+    }
+}
+
+proof fn lemma_records_reverse<C: Codec>(s: Seq<u8>)
+    requires
+        codec_ok::<C>(),
+    ensures
+        parse_records::<C>(s) matches Some(xs) ==> unparse_records::<C>(xs) == s,
+{
+    if let Some(xs) = parse_records::<C>(s) {
+        lemma_split_reverse::<C>(s);
+        let st = split_run(split_init(), s, C::delim());
+        assert(st.cur.len() == 0);
+        assert(s =~= unparse_lines::<C>(st.lines));
+        lemma_dec_records_reverse::<C>(st.lines);
+    }
+}
+
+proof fn lemma_records_injective<C: Codec>(x: Seq<Seq<u8>>, y: Seq<Seq<u8>>)
+    requires
+        codec_ok::<C>(),
+        unparse_records::<C>(x) == unparse_records::<C>(y),
+    ensures
+        x == y,
+{
+    lemma_records_round_trip::<C>(x);
+    lemma_records_round_trip::<C>(y);
+}
+
+pub open spec fn no_delim<C: Codec>(l: Seq<u8>) -> bool {
+    no_byte(l, C::delim())
+}
+
+pub open spec fn all_nonempty(s: Seq<Seq<u8>>) -> bool {
+    forall|k: int| 0 <= k < s.len() ==> (#[trigger] s[k]).len() > 0
+}
+
+
+proof fn lemma_groups_lines_add<C: Codec>(a: Seq<GroupS>, b: Seq<GroupS>)
+    requires
+        codec_ok::<C>(),
+    ensures
+        groups_lines::<C>(a + b) == groups_lines::<C>(a) + groups_lines::<C>(b),
+    decreases a.len(),
+{
+    if a.len() > 0 {
+        let t = a.subrange(1, a.len() as int);
+        lemma_groups_lines_add::<C>(t, b);
+        assert((a + b).subrange(1, (a + b).len() as int) =~= t + b);
+        assert((a + b)[0] == a[0]);
+        assert(groups_lines::<C>(a + b) =~= groups_lines::<C>(a) + groups_lines::<C>(b));
+    } else {
+        assert(a + b =~= b);
+        assert(groups_lines::<C>(a) =~= Seq::<Seq<Seq<u8>>>::empty());
+        assert(groups_lines::<C>(a) + groups_lines::<C>(b) =~= groups_lines::<C>(b));
+    }
+}
+
+// ===== part 3: documents (line fold), ported from kata 0003 =====
+pub struct PState {
+    pub ok: bool,
+    pub doc: Seq<GroupS>,
+    pub fresh: bool,
+}
+
+pub open spec fn pinit() -> PState {
+    PState { ok: true, doc: seq![], fresh: true }
+}
+
+pub open spec fn pfail() -> PState {
+    PState { ok: false, doc: seq![], fresh: true }
+}
+
+pub open spec fn add_name(doc: Seq<GroupS>, v: Seq<u8>) -> Seq<GroupS> {
+    doc.update(
+        doc.len() - 1,
+        GroupS { header: doc[doc.len() - 1].header, names: doc[doc.len() - 1].names.push(v) },
+    )
+}
+
+pub open spec fn pstep<C: Codec>(st: PState, line: Seq<u8>) -> PState {
+    if !st.ok {
+        st
+    } else if line.len() == 0 {
+        if st.fresh {
+            pfail()
+        } else {
+            PState { ok: true, doc: st.doc, fresh: true }
+        }
+    } else {
+        match dec_line::<C>(line) {
+            None => pfail(),
+            Some((v, h)) => if h {
+                if st.fresh {
+                    PState { ok: true, doc: st.doc.push(GroupS { header: Some(v), names: seq![] }), fresh: false }
+                } else {
+                    pfail()
+                }
+            } else if st.fresh {
+                if st.doc.len() == 0 {
+                    PState { ok: true, doc: seq![GroupS { header: None, names: seq![v] }], fresh: false }
+                } else {
+                    pfail()
+                }
+            } else {
+                PState { ok: true, doc: add_name(st.doc, v), fresh: false }
+            },
+        }
+    }
+}
+
+pub open spec fn prun<C: Codec>(st: PState, lines: Seq<Seq<u8>>) -> PState
+    decreases lines.len(),
+{
+    if lines.len() == 0 {
+        st
+    } else {
+        pstep::<C>(prun::<C>(st, lines.subrange(0, lines.len() - 1)), lines[lines.len() - 1])
+    }
+}
+
+pub open spec fn parse_lines<C: Codec>(lines: Seq<Seq<u8>>) -> Option<Seq<GroupS>> {
+    let st = prun::<C>(pinit(), lines);
+    if st.ok && !(st.fresh && st.doc.len() > 0) {
+        Some(st.doc)
+    } else {
+        None
+    }
+}
+
+pub open spec fn parse_document<C: Codec>(s: Seq<u8>) -> Option<Seq<GroupS>> {
+    match split_lines(s, C::delim()) {
+        Some(lines) => parse_lines::<C>(lines),
+        None => None,
+    }
+}
+
+proof fn lemma_prun_add<C: Codec>(st: PState, a: Seq<Seq<u8>>, b: Seq<Seq<u8>>)
+    requires
+        codec_ok::<C>(),
+    ensures
+        prun::<C>(st, a + b) == prun::<C>(prun::<C>(st, a), b),
+    decreases b.len(),
+{
+    if b.len() == 0 {
+        assert(a + b =~= a);
+    } else {
+        let bp = b.subrange(0, b.len() - 1);
+        lemma_prun_add::<C>(st, a, bp);
+        assert((a + b).subrange(0, (a + b).len() - 1) =~= a + bp);
+        assert((a + b)[(a + b).len() - 1] == b[b.len() - 1]);
+    }
+}
+
+proof fn lemma_prun_one<C: Codec>(st: PState, l: Seq<u8>)
+    requires
+        codec_ok::<C>(),
+    ensures
+        prun::<C>(st, seq![l]) == pstep::<C>(st, l),
+{
+    assert(seq![l].subrange(0, 0) =~= Seq::<Seq<u8>>::empty());
+    assert(prun::<C>(st, Seq::<Seq<u8>>::empty()) == st);
+    assert(seq![l][0] == l);
+}
+
+proof fn lemma_encode_all_push<C: Codec>(m: Seq<Seq<u8>>, v: Seq<u8>)
+    requires
+        codec_ok::<C>(),
+    ensures
+        encode_all::<C>(m.push(v)) == encode_all::<C>(m) + seq![encode::<C>(v)],
+    decreases m.len(),
+{
+    if m.len() == 0 {
+        assert(m.push(v).subrange(1, 1) =~= Seq::<Seq<u8>>::empty());
+        assert(encode_all::<C>(Seq::<Seq<u8>>::empty()) == Seq::<Seq<u8>>::empty());
+        assert(encode_all::<C>(m.push(v)) =~= encode_all::<C>(m) + seq![encode::<C>(v)]);
+    } else {
+        let t = m.subrange(1, m.len() as int);
+        lemma_encode_all_push::<C>(t, v);
+        assert(m.push(v).subrange(1, m.len() as int + 1) =~= t.push(v));
+        assert(encode_all::<C>(m.push(v)) =~= encode_all::<C>(m) + seq![encode::<C>(v)]);
+    }
+}
+
+/// Appending escaped names to the open last group.
+proof fn lemma_prun_names<C: Codec>(st: PState, m: Seq<Seq<u8>>)
+    requires
+        codec_ok::<C>(),
+        st.ok,
+        !st.fresh,
+        st.doc.len() > 0,
+        all_nonempty(m),
+    ensures
+        prun::<C>(st, encode_all::<C>(m)) == (PState {
+            ok: true,
+            doc: st.doc.update(
+                st.doc.len() - 1,
+                GroupS { header: st.doc[st.doc.len() - 1].header, names: st.doc[st.doc.len() - 1].names + m },
+            ),
+            fresh: false,
+        }),
+    decreases m.len(),
+{
+    let last = st.doc[st.doc.len() - 1];
+    if m.len() == 0 {
+        assert(encode_all::<C>(m) =~= Seq::<Seq<u8>>::empty());
+        assert(last.names + m =~= last.names);
+        assert(st.doc.update(st.doc.len() - 1, GroupS { header: last.header, names: last.names + m }) =~= st.doc);
+    } else {
+        let mp = m.subrange(0, m.len() - 1);
+        let v = m[m.len() - 1];
+        assert(all_nonempty(mp)) by {
+            assert forall|k: int| 0 <= k < mp.len() implies (#[trigger] mp[k]).len() > 0 by {
+                assert(mp[k] == m[k]);
+            }
+        }
+        lemma_prun_names::<C>(st, mp);
+        assert(mp.push(v) =~= m);
+        lemma_encode_all_push::<C>(mp, v);
+        lemma_prun_add::<C>(st, encode_all::<C>(mp), seq![encode::<C>(v)]);
+        let mid = prun::<C>(st, encode_all::<C>(mp));
+        lemma_prun_one::<C>(mid, encode::<C>(v));
+        assert(v.len() > 0);
+        lemma_encode_no_delim::<C>(v);
+        lemma_dec_encode::<C>(v, false);
+        assert(encode::<C>(v) + suffix::<C>(false) =~= encode::<C>(v));
+        assert(mid.doc[mid.doc.len() - 1].names.push(v) =~= last.names + m);
+        assert(add_name(mid.doc, v) =~= st.doc.update(
+            st.doc.len() - 1,
+            GroupS { header: last.header, names: last.names + m },
+        ));
+    }
+}
+
+/// A group with a header, started from a fresh state.
+proof fn lemma_prun_header_group<C: Codec>(st: PState, g: GroupS)
+    requires
+        codec_ok::<C>(),
+        st.ok,
+        st.fresh,
+        has_header(g),
+        all_nonempty(g.names),
+    ensures
+        prun::<C>(st, group_lines::<C>(g)) == (PState { ok: true, doc: st.doc.push(g), fresh: false }),
+{
+    let h = g.header.unwrap();
+    let hl = encode::<C>(h) + seq![C::marker()];
+    assert(group_lines::<C>(g) == seq![hl] + encode_all::<C>(g.names));
+    lemma_prun_add::<C>(st, seq![hl], encode_all::<C>(g.names));
+    lemma_prun_one::<C>(st, hl);
+    lemma_dec_encode::<C>(h, true);
+    let s1 = PState { ok: true, doc: st.doc.push(GroupS { header: Some(h), names: seq![] }), fresh: false };
+    assert(pstep::<C>(st, hl) == s1);
+    lemma_prun_names::<C>(s1, g.names);
+    assert(Seq::<Seq<u8>>::empty() + g.names =~= g.names);
+    assert(s1.doc.update(s1.doc.len() - 1, GroupS { header: Some(h), names: Seq::<Seq<u8>>::empty() + g.names })
+        =~= st.doc.push(g));
+}
+
+/// A headerless (hence first, non-empty) group, from the initial state.
+proof fn lemma_prun_first_plain_group<C: Codec>(g: GroupS)
+    requires
+        codec_ok::<C>(),
+        !has_header(g),
+        g.names.len() > 0,
+        all_nonempty(g.names),
+    ensures
+        prun::<C>(pinit(), group_lines::<C>(g)) == (PState { ok: true, doc: seq![g], fresh: false }),
+{
+    let m = g.names;
+    let rest = m.subrange(1, m.len() as int);
+    assert(group_lines::<C>(g) =~= encode_all::<C>(m));
+    assert(encode_all::<C>(m) == seq![encode::<C>(m[0])] + encode_all::<C>(rest));
+    lemma_prun_add::<C>(pinit(), seq![encode::<C>(m[0])], encode_all::<C>(rest));
+    lemma_prun_one::<C>(pinit(), encode::<C>(m[0]));
+    lemma_encode_no_delim::<C>(m[0]);
+    lemma_dec_encode::<C>(m[0], false);
+    assert(encode::<C>(m[0]) + suffix::<C>(false) =~= encode::<C>(m[0]));
+    let s1 = PState { ok: true, doc: seq![GroupS { header: None, names: seq![m[0]] }], fresh: false };
+    assert(pstep::<C>(pinit(), encode::<C>(m[0])) == s1);
+    assert(all_nonempty(rest)) by {
+        assert forall|k: int| 0 <= k < rest.len() implies (#[trigger] rest[k]).len() > 0 by {
+            assert(rest[k] == m[k + 1]);
+        }
+    }
+    lemma_prun_names::<C>(s1, rest);
+    assert(seq![m[0]] + rest =~= m);
+    assert(g.header == None::<Seq<u8>>);
+    assert(s1.doc.update(0, GroupS { header: None, names: seq![m[0]] + rest }) =~= seq![g]);
+}
+
+proof fn lemma_groups_lines_push<C: Codec>(x: Seq<GroupS>, g: GroupS)
+    requires
+        codec_ok::<C>(),
+    ensures
+        groups_lines::<C>(x.push(g)) == groups_lines::<C>(x).push(group_lines::<C>(g)),
+{
+    lemma_groups_lines_add::<C>(x, seq![g]);
+    assert(x.push(g) =~= x + seq![g]);
+    assert(seq![g].subrange(1, 1) =~= Seq::<GroupS>::empty());
+    assert(groups_lines::<C>(Seq::<GroupS>::empty()) == Seq::<Seq<Seq<u8>>>::empty());
+    assert(groups_lines::<C>(seq![g]) =~= seq![group_lines::<C>(g)]);
+    assert(groups_lines::<C>(x) + seq![group_lines::<C>(g)] =~= groups_lines::<C>(x).push(group_lines::<C>(g)));
+}
+
+proof fn lemma_groups_lines_len<C: Codec>(x: Seq<GroupS>)
+    requires
+        codec_ok::<C>(),
+    ensures
+        groups_lines::<C>(x).len() == x.len(),
+    decreases x.len(),
+{
+    if x.len() > 0 {
+        lemma_groups_lines_len::<C>(x.subrange(1, x.len() as int));
+    }
+}
+
+proof fn lemma_wf_prefix<C: Codec>(x: Seq<GroupS>)
+    requires
+        codec_ok::<C>(),
+        wf_document(x),
+        x.len() > 0,
+    ensures
+        wf_document(x.subrange(0, x.len() - 1)),
+        forall|j: int| 0 <= j < x.len() ==> all_nonempty(#[trigger] x[j].names),
+{
+    let p = x.subrange(0, x.len() - 1);
+    assert forall|i: int, j: int| 0 <= i < p.len() && 0 <= j < p[i].names.len() implies (#[trigger] p[i].names[j]).len()
+        > 0 by {
+        assert(p[i] == x[i]);
+        assert(x[i].names[j].len() > 0);
+    }
+    assert forall|i: int| 0 < i < p.len() implies has_header(#[trigger] p[i]) by {
+        assert(p[i] == x[i]);
+    }
+    if p.len() > 0 {
+        assert(p[0] == x[0]);
+    }
+    assert forall|j: int| 0 <= j < x.len() implies all_nonempty(#[trigger] x[j].names) by {
+        assert forall|k: int| 0 <= k < x[j].names.len() implies (#[trigger] x[j].names[k]).len() > 0 by {
+            assert(x[j].names[k].len() > 0);
+        }
+    }
+}
+
+/// Forward direction for the line fold.
+proof fn lemma_prun_doc<C: Codec>(x: Seq<GroupS>)
+    requires
+        codec_ok::<C>(),
+        wf_document(x),
+        x.len() > 0,
+    ensures
+        prun::<C>(pinit(), join_groups(groups_lines::<C>(x))) == (PState { ok: true, doc: x, fresh: false }),
+    decreases x.len(),
+{
+    lemma_wf_prefix::<C>(x);
+    lemma_groups_lines_len::<C>(x);
+    let k = x.len();
+    let g = x[k - 1];
+    let p = x.subrange(0, k - 1);
+    assert(x =~= p.push(g));
+    lemma_groups_lines_push::<C>(p, g);
+    let gl = groups_lines::<C>(x);
+    if k == 1 {
+        assert(join_groups(gl) == gl[0]);
+        assert(gl[0] == group_lines::<C>(g));
+        if has_header(g) {
+            lemma_prun_header_group::<C>(pinit(), g);
+            assert(Seq::<GroupS>::empty().push(g) =~= x);
+        } else {
+            lemma_prun_first_plain_group::<C>(g);
+            assert(seq![g] =~= x);
+        }
+    } else {
+        lemma_prun_doc::<C>(p);
+        lemma_groups_lines_len::<C>(p);
+        assert(gl.subrange(0, gl.len() - 1) =~= groups_lines::<C>(p));
+        assert(join_groups(gl) == join_groups(groups_lines::<C>(p)) + seq![Seq::<u8>::empty()] + group_lines::<C>(g));
+        let s1 = PState { ok: true, doc: p, fresh: false };
+        lemma_prun_add::<C>(pinit(), join_groups(groups_lines::<C>(p)) + seq![Seq::<u8>::empty()], group_lines::<C>(g));
+        lemma_prun_add::<C>(pinit(), join_groups(groups_lines::<C>(p)), seq![Seq::<u8>::empty()]);
+        lemma_prun_one::<C>(s1, Seq::<u8>::empty());
+        let s2 = PState { ok: true, doc: p, fresh: true };
+        assert(pstep::<C>(s1, Seq::<u8>::empty()) == s2);
+        assert(has_header(x[k - 1]));
+        lemma_prun_header_group::<C>(s2, g);
+    }
+}
+
+proof fn lemma_group_lines_no_lf<C: Codec>(g: GroupS)
+    requires
+        codec_ok::<C>(),
+    ensures
+        forall|k: int| 0 <= k < group_lines::<C>(g).len() ==> no_delim::<C>(#[trigger] group_lines::<C>(g)[k]),
+{
+    lemma_encode_all_index::<C>(g.names);
+    let gl = group_lines::<C>(g);
+    assert forall|k: int| 0 <= k < gl.len() implies no_delim::<C>(#[trigger] gl[k]) by {
+        match g.header {
+            Some(h) => {
+                if k == 0 {
+                    lemma_encode_no_delim::<C>(h);
+                    let hl = encode::<C>(h) + seq![C::marker()];
+                    assert(gl[0] == hl);
+                    lemma_ok::<C>();
+                    assert forall|i: int| 0 <= i < hl.len() implies hl[i] != C::delim() by {
+                        if i < encode::<C>(h).len() {
+                            assert(hl[i] == encode::<C>(h)[i]);
+                        }
+                    }
+                } else {
+                    assert(gl[k] == encode_all::<C>(g.names)[k - 1]);
+                    lemma_encode_no_delim::<C>(g.names[k - 1]);
+                }
+            },
+            None => {
+                assert(gl[k] == encode_all::<C>(g.names)[k]);
+                lemma_encode_no_delim::<C>(g.names[k]);
+            },
+        }
+    }
+}
+
+proof fn lemma_join_no_lf<C: Codec>(gs: Seq<Seq<Seq<u8>>>)
+    requires
+        codec_ok::<C>(),
+        forall|i: int, k: int| 0 <= i < gs.len() && 0 <= k < gs[i].len() ==> no_delim::<C>(#[trigger] gs[i][k]),
+    ensures
+        forall|k: int| 0 <= k < join_groups(gs).len() ==> no_delim::<C>(#[trigger] join_groups(gs)[k]),
+    decreases gs.len(),
+{
+    let j = join_groups(gs);
+    if gs.len() == 1 {
+        assert forall|k: int| 0 <= k < j.len() implies no_delim::<C>(#[trigger] j[k]) by {
+            assert(j[k] == gs[0][k]);
+        }
+    } else if gs.len() > 1 {
+        let p = gs.subrange(0, gs.len() - 1);
+        lemma_join_no_lf::<C>(p);
+        let jp = join_groups(p);
+        let last = gs[gs.len() - 1];
+        assert(j == jp + seq![Seq::<u8>::empty()] + last);
+        assert forall|k: int| 0 <= k < j.len() implies no_delim::<C>(#[trigger] j[k]) by {
+            if k < jp.len() {
+                assert(j[k] == jp[k]);
+            } else if k == jp.len() {
+                assert(j[k] == Seq::<u8>::empty());
+            } else {
+                assert(j[k] == last[k - jp.len() - 1]);
+            }
+        }
+    }
+}
+
+proof fn lemma_unparse_lines_no_lf<C: Codec>(x: Seq<GroupS>)
+    requires
+        codec_ok::<C>(),
+    ensures
+        forall|k: int|
+            0 <= k < join_groups(groups_lines::<C>(x)).len() ==> no_delim::<C>(#[trigger] join_groups(groups_lines::<C>(x))[k]),
+{
+    let gs = groups_lines::<C>(x);
+    lemma_groups_lines_len::<C>(x);
+    assert forall|i: int, k: int| 0 <= i < gs.len() && 0 <= k < gs[i].len() implies no_delim::<C>(#[trigger] gs[i][k]) by {
+        lemma_groups_lines_index::<C>(x, i);
+        lemma_group_lines_no_lf::<C>(x[i]);
+    }
+    lemma_join_no_lf::<C>(gs);
+}
+
+proof fn lemma_groups_lines_index<C: Codec>(x: Seq<GroupS>, i: int)
+    requires
+        codec_ok::<C>(),
+        0 <= i < x.len(),
+    ensures
+        groups_lines::<C>(x)[i] == group_lines::<C>(x[i]),
+    decreases x.len(),
+{
+    let t = x.subrange(1, x.len() as int);
+    assert(groups_lines::<C>(x) == seq![group_lines::<C>(x[0])] + groups_lines::<C>(t));
+    lemma_groups_lines_len::<C>(t);
+    if i > 0 {
+        lemma_groups_lines_index::<C>(t, i - 1);
+        assert(t[i - 1] == x[i]);
+        assert(groups_lines::<C>(x)[i] == groups_lines::<C>(t)[i - 1]);
+    }
+}
+
+/// The paper's round trip, at spec level: parse(unparse_document::<C>(x)) = x.
+proof fn lemma_document_round_trip<C: Codec>(x: Seq<GroupS>)
+    requires
+        codec_ok::<C>(),
+        wf_document(x),
+    ensures
+        parse_document::<C>(unparse_document::<C>(x)) == Some(x),
+{
+    let lines = join_groups(groups_lines::<C>(x));
+    lemma_unparse_lines_no_lf::<C>(x);
+    lemma_split_unparse::<C>(Seq::<Seq<u8>>::empty(), lines);
+    assert(Seq::<Seq<u8>>::empty() + lines =~= lines);
+    assert(split_init() == (SplitS { lines: Seq::<Seq<u8>>::empty(), cur: Seq::<u8>::empty() }));
+    assert(split_lines(unparse_document::<C>(x), C::delim()) == Some(lines));
+    if x.len() > 0 {
+        lemma_prun_doc::<C>(x);
+    } else {
+        assert(groups_lines::<C>(x) =~= Seq::<Seq<Seq<u8>>>::empty());
+        assert(lines =~= Seq::<Seq<u8>>::empty());
+    }
+}
+
+// ---- reverse direction: whatever parses, unparses back (strictness) ----
+
+proof fn lemma_join_extend<C: Codec>(gs: Seq<Seq<Seq<u8>>>, l: Seq<u8>)
+    requires
+        codec_ok::<C>(),
+        gs.len() > 0,
+    ensures
+        join_groups(gs.update(gs.len() - 1, gs[gs.len() - 1].push(l))) == join_groups(gs).push(l),
+{
+    let gs2 = gs.update(gs.len() - 1, gs[gs.len() - 1].push(l));
+    if gs.len() == 1 {
+        assert(join_groups(gs2) == gs2[0]);
+    } else {
+        assert(gs2.subrange(0, gs2.len() - 1) =~= gs.subrange(0, gs.len() - 1));
+        assert(join_groups(gs2) =~= join_groups(gs).push(l));
+    }
+}
+
+proof fn lemma_join_push<C: Codec>(gs: Seq<Seq<Seq<u8>>>, g: Seq<Seq<u8>>)
+    requires
+        codec_ok::<C>(),
+    ensures
+        join_groups(gs.push(g)) == if gs.len() == 0 {
+            g
+        } else {
+            join_groups(gs) + seq![Seq::<u8>::empty()] + g
+        },
+{
+    let gs2 = gs.push(g);
+    if gs.len() > 0 {
+        assert(gs2.subrange(0, gs2.len() - 1) =~= gs);
+    }
+}
+
+pub open spec fn prun_inv<C: Codec>(lines: Seq<Seq<u8>>, st: PState) -> bool {
+    &&& wf_document(st.doc)
+    &&& st.doc.len() == 0 ==> lines.len() == 0 && st.fresh
+    &&& st.doc.len() > 0 ==> lines == join_groups(groups_lines::<C>(st.doc)) + (if st.fresh {
+        seq![Seq::<u8>::empty()]
+    } else {
+        Seq::<Seq<u8>>::empty()
+    })
+}
+
+proof fn lemma_prun_reverse<C: Codec>(lines: Seq<Seq<u8>>)
+    requires
+        codec_ok::<C>(),
+    ensures
+        prun::<C>(pinit(), lines).ok ==> prun_inv::<C>(lines, prun::<C>(pinit(), lines)),
+    decreases lines.len(),
+{
+    let st = prun::<C>(pinit(), lines);
+    if lines.len() == 0 || !st.ok {
+        return;
+    }
+    let p = lines.subrange(0, lines.len() - 1);
+    let l = lines[lines.len() - 1];
+    lemma_prun_reverse::<C>(p);
+    let s0 = prun::<C>(pinit(), p);
+    assert(lines =~= p.push(l));
+    assert(st == pstep::<C>(s0, l));
+    assert(s0.ok);
+    lemma_groups_lines_len::<C>(s0.doc);
+    if l.len() == 0 {
+        assert(!s0.fresh && s0.doc.len() > 0);
+        assert(p =~= join_groups(groups_lines::<C>(s0.doc)));
+        assert(l =~= Seq::<u8>::empty());
+        assert(lines =~= join_groups(groups_lines::<C>(s0.doc)) + seq![Seq::<u8>::empty()]);
+    } else {
+        lemma_dec_reverse::<C>(l);
+        let (v, h) = dec_line::<C>(l).unwrap();
+        assert(l == encode::<C>(v) + suffix::<C>(h));
+        if h {
+            let g = GroupS { header: Some(v), names: seq![] };
+            assert(st.doc == s0.doc.push(g));
+            lemma_groups_lines_push::<C>(s0.doc, g);
+            lemma_join_push::<C>(groups_lines::<C>(s0.doc), group_lines::<C>(g));
+            assert(encode_all::<C>(Seq::<Seq<u8>>::empty()) == Seq::<Seq<u8>>::empty());
+            assert(group_lines::<C>(g) =~= seq![l]);
+            if s0.doc.len() == 0 {
+                assert(lines =~= seq![l]);
+                assert(join_groups(groups_lines::<C>(st.doc)) =~= seq![l]);
+            } else {
+                assert(lines =~= join_groups(groups_lines::<C>(st.doc)));
+            }
+            assert(wf_document(st.doc)) by {
+                assert forall|i: int, j: int|
+                    0 <= i < st.doc.len() && 0 <= j < st.doc[i].names.len() implies (#[trigger] st.doc[i].names[j]).len()
+                    > 0 by {
+                    assert(st.doc[i] == s0.doc[i]);
+                }
+                assert forall|i: int| 0 < i < st.doc.len() implies has_header(#[trigger] st.doc[i]) by {
+                    if i < s0.doc.len() {
+                        assert(st.doc[i] == s0.doc[i]);
+                    }
+                }
+                if s0.doc.len() > 0 {
+                    assert(st.doc[0] == s0.doc[0]);
+                }
+            }
+        } else {
+            assert(v.len() > 0) by {
+                if v.len() == 0 {
+                    assert(encode::<C>(v) =~= Seq::<u8>::empty());
+                    assert(l =~= Seq::<u8>::empty());
+                }
+            }
+            assert(l =~= encode::<C>(v));
+            if s0.fresh {
+                let g = GroupS { header: None, names: seq![v] };
+                assert(s0.doc.len() == 0 && p.len() == 0);
+                assert(st.doc == seq![g]);
+                assert(seq![g] =~= Seq::<GroupS>::empty().push(g));
+                lemma_groups_lines_push::<C>(Seq::<GroupS>::empty(), g);
+                assert(groups_lines::<C>(Seq::<GroupS>::empty()) == Seq::<Seq<Seq<u8>>>::empty());
+                lemma_join_push::<C>(Seq::<Seq<Seq<u8>>>::empty(), group_lines::<C>(g));
+                lemma_encode_all_push::<C>(Seq::<Seq<u8>>::empty(), v);
+                assert(Seq::<Seq<u8>>::empty().push(v) =~= seq![v]);
+                assert(encode_all::<C>(Seq::<Seq<u8>>::empty()) == Seq::<Seq<u8>>::empty());
+                assert(group_lines::<C>(g) =~= seq![l]);
+                assert(lines =~= seq![l]);
+                assert(wf_document(st.doc)) by {
+                    assert forall|i: int, j: int|
+                        0 <= i < st.doc.len() && 0 <= j < st.doc[i].names.len() implies (#[trigger] st.doc[i].names[j]).len()
+                        > 0 by {
+                        assert(st.doc[i] == g);
+                    }
+                }
+            } else {
+                let d = s0.doc;
+                let last = d[d.len() - 1];
+                let last2 = GroupS { header: last.header, names: last.names.push(v) };
+                assert(st.doc == d.update(d.len() - 1, last2));
+                lemma_encode_all_push::<C>(last.names, v);
+                assert(group_lines::<C>(last2) =~= group_lines::<C>(last).push(l));
+                let gl = groups_lines::<C>(d);
+                lemma_groups_lines_index::<C>(d, d.len() - 1);
+                assert(groups_lines::<C>(st.doc) =~= gl.update(gl.len() - 1, gl[gl.len() - 1].push(l))) by {
+                    lemma_groups_lines_len::<C>(st.doc);
+                    assert forall|i: int| 0 <= i < gl.len() implies #[trigger] groups_lines::<C>(st.doc)[i] == gl.update(
+                        gl.len() - 1,
+                        gl[gl.len() - 1].push(l),
+                    )[i] by {
+                        lemma_groups_lines_index::<C>(st.doc, i);
+                        lemma_groups_lines_index::<C>(d, i);
+                    }
+                }
+                lemma_join_extend::<C>(gl, l);
+                assert(lines =~= join_groups(groups_lines::<C>(st.doc)) + Seq::<Seq<u8>>::empty());
+                assert(wf_document(st.doc)) by {
+                    assert forall|i: int, j: int|
+                        0 <= i < st.doc.len() && 0 <= j < st.doc[i].names.len() implies (#[trigger] st.doc[i].names[j]).len()
+                        > 0 by {
+                        if i < d.len() - 1 {
+                            assert(st.doc[i] == d[i]);
+                        } else if j < last.names.len() {
+                            assert(st.doc[i].names[j] == last.names[j]);
+                        }
+                    }
+                    assert forall|i: int| 0 < i < st.doc.len() implies has_header(#[trigger] st.doc[i]) by {
+                        if i < d.len() - 1 {
+                            assert(st.doc[i] == d[i]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+proof fn lemma_document_reverse<C: Codec>(s: Seq<u8>)
+    requires
+        codec_ok::<C>(),
+    ensures
+        parse_document::<C>(s) matches Some(d) ==> wf_document(d) && unparse_document::<C>(d) == s,
+{
+    if let Some(d) = parse_document::<C>(s) {
+        lemma_split_reverse::<C>(s);
+        let st = split_run(split_init(), s, C::delim());
+        assert(st.cur.len() == 0);
+        assert(s =~= unparse_lines::<C>(st.lines));
+        lemma_prun_reverse::<C>(st.lines);
+        let ps = prun::<C>(pinit(), st.lines);
+        if ps.doc.len() == 0 {
+            assert(st.lines.len() == 0);
+            assert(groups_lines::<C>(d) =~= Seq::<Seq<Seq<u8>>>::empty());
+            assert(join_groups(groups_lines::<C>(d)) =~= st.lines);
+        } else {
+            assert(st.lines =~= join_groups(groups_lines::<C>(d)));
+        }
+    }
+}
+
+proof fn lemma_document_injective<C: Codec>(x: Seq<GroupS>, y: Seq<GroupS>)
+    requires
+        codec_ok::<C>(),
+        wf_document(x),
+        wf_document(y),
+        unparse_document::<C>(x) == unparse_document::<C>(y),
+    ensures
+        x == y,
+{
+    lemma_document_round_trip::<C>(x);
+    lemma_document_round_trip::<C>(y);
+}
+
 // </vc-helpers>
 
 // ===========================================================================
@@ -432,8 +1783,28 @@ pub fn encode_into<C: Codec>(out: &mut Vec<u8>, s: &Vec<u8>)
         final(out)@ == old(out)@ + encode::<C>(s@),
 {
     // <vc-code>
-    assume(false);
-    unreached()
+    let ghost o = out@;
+    let mut i: usize = 0;
+    assert(s@.subrange(0, s@.len() as int) =~= s@);
+    assert(o + encode::<C>(s@) =~= o + encode::<C>(s@));
+    while i < s.len()
+        invariant
+            i <= s.len(),
+            out@ + encode::<C>(s@.subrange(i as int, s@.len() as int)) == o + encode::<C>(s@),
+        decreases s.len() - i,
+    {
+        let ghost t = s@.subrange(i as int, s@.len() as int);
+        let ghost rest = s@.subrange(i + 1, s@.len() as int);
+        assert(t.subrange(1, t.len() as int) =~= rest);
+        assert(t[0] == s@[i as int]);
+        assert(encode::<C>(t) == C::code(s@[i as int]) + encode::<C>(rest));
+        let ghost before = out@;
+        C::push_code(out, s[i]);
+        assert(out@ + encode::<C>(rest) =~= before + encode::<C>(t));
+        i += 1;
+    }
+    assert(s@.subrange(s@.len() as int, s@.len() as int) =~= Seq::<u8>::empty());
+    assert(out@ + encode::<C>(Seq::<u8>::empty()) =~= out@);
     // </vc-code>
 }
 
@@ -442,8 +1813,39 @@ pub fn unparse_records_exec<C: Codec>(rs: &Vec<Vec<u8>>) -> (r: Vec<u8>)
         r@ == unparse_records::<C>(seqs_view(rs@)),
 {
     // <vc-code>
-    assume(false);
-    unreached()
+    let ghost all = seqs_view(rs@);
+    let mut out: Vec<u8> = Vec::new();
+    let d = C::delim_exec();
+    let mut i: usize = 0;
+    assert(all.subrange(0, all.len() as int) =~= all);
+    assert(out@ + unparse_records::<C>(all) =~= unparse_records::<C>(all));
+    while i < rs.len()
+        invariant
+            i <= rs.len(),
+            all == seqs_view(rs@),
+            d == C::delim(),
+            out@ + unparse_lines::<C>(encode_all::<C>(all.subrange(i as int, all.len() as int))) == unparse_records::<C>(all),
+        decreases rs.len() - i,
+    {
+        let ghost t = all.subrange(i as int, all.len() as int);
+        let ghost rest = all.subrange(i + 1, all.len() as int);
+        assert(t.subrange(1, t.len() as int) =~= rest);
+        assert(t[0] == rs@[i as int]@);
+        let ghost et = encode_all::<C>(t);
+        assert(et == seq![encode::<C>(t[0])] + encode_all::<C>(rest));
+        assert(et.subrange(1, et.len() as int) =~= encode_all::<C>(rest));
+        assert(unparse_lines::<C>(et) == et[0] + seq![d] + unparse_lines::<C>(encode_all::<C>(rest)));
+        let ghost before = out@;
+        encode_into::<C>(&mut out, &rs[i]);
+        out.push(d);
+        assert(out@ + unparse_lines::<C>(encode_all::<C>(rest)) =~= before + unparse_lines::<C>(et));
+        i += 1;
+    }
+    assert(all.subrange(all.len() as int, all.len() as int) =~= Seq::<Seq<u8>>::empty());
+    assert(encode_all::<C>(Seq::<Seq<u8>>::empty()) == Seq::<Seq<u8>>::empty());
+    assert(unparse_lines::<C>(Seq::<Seq<u8>>::empty()) == Seq::<u8>::empty());
+    assert(out@ + Seq::<u8>::empty() =~= out@);
+    out
     // </vc-code>
 }
 
@@ -457,8 +1859,30 @@ pub fn count_delims<C: Codec>(acc: u64, chunk: &Vec<u8>) -> (r: Option<u64>)
         }),
 {
     // <vc-code>
-    assume(false);
-    unreached()
+    let d = C::delim_exec();
+    let mut n: u64 = acc;
+    let mut i: usize = 0;
+    assert(chunk@.subrange(0, chunk@.len() as int) =~= chunk@);
+    while i < chunk.len()
+        invariant
+            i <= chunk.len(),
+            d == C::delim(),
+            n + count_byte(chunk@.subrange(i as int, chunk@.len() as int), d) == acc + count_byte(chunk@, d),
+        decreases chunk.len() - i,
+    {
+        let ghost t = chunk@.subrange(i as int, chunk@.len() as int);
+        assert(t.subrange(1, t.len() as int) =~= chunk@.subrange(i + 1, chunk@.len() as int));
+        assert(t[0] == chunk@[i as int]);
+        if chunk[i] == d {
+            if n == u64::MAX {
+                return None;
+            }
+            n = n + 1;
+        }
+        i += 1;
+    }
+    assert(chunk@.subrange(chunk@.len() as int, chunk@.len() as int) =~= Seq::<u8>::empty());
+    Some(n)
     // </vc-code>
 }
 
@@ -516,8 +1940,26 @@ pub fn family_push_code<F: EscapeFamily>(out: &mut Vec<u8>, b: u8)
         final(out)@ == old(out)@ + family_table::<F>(b),
 {
     // <vc-code>
-    assume(false);
-    unreached()
+    let ghost o = out@;
+    if F::literal_exec(b) {
+        out.push(b);
+    } else {
+        match F::short_exec(b) {
+            Some(s) => {
+                out.push(F::esc_exec());
+                out.push(s);
+            },
+            None => {
+                let hi = b / 16;
+                let lo = b % 16;
+                out.push(F::esc_exec());
+                out.push(120u8);
+                out.push(if hi < 10 { 48 + hi } else { 87 + hi });
+                out.push(if lo < 10 { 48 + lo } else { 87 + lo });
+            },
+        }
+    }
+    assert(out@ =~= o + family_table::<F>(b));
     // </vc-code>
 }
 
@@ -533,7 +1975,7 @@ pub proof fn theorem_record_count<C: Codec>(rs: Seq<Seq<u8>>)
         count_byte(unparse_records::<C>(rs), C::delim()) == rs.len(),
 {
     // <vc-code>
-    assume(false);
+    lemma_record_count::<C>(rs);
     // </vc-code>
 }
 
@@ -543,7 +1985,7 @@ pub proof fn theorem_count_concat(a: Seq<u8>, b: Seq<u8>, d: u8)
         count_byte(a + b, d) == count_byte(a, d) + count_byte(b, d),
 {
     // <vc-code>
-    assume(false);
+    lemma_count_concat(a, b, d);
     // </vc-code>
 }
 
@@ -556,7 +1998,7 @@ pub proof fn theorem_records_injective<C: Codec>(x: Seq<Seq<u8>>, y: Seq<Seq<u8>
         x == y,
 {
     // <vc-code>
-    assume(false);
+    lemma_records_injective::<C>(x, y);
     // </vc-code>
 }
 
@@ -572,7 +2014,7 @@ pub proof fn theorem_document_injective<C: Codec>(x: Seq<GroupS>, y: Seq<GroupS>
         x == y,
 {
     // <vc-code>
-    assume(false);
+    lemma_document_injective::<C>(x, y);
     // </vc-code>
 }
 
@@ -593,7 +2035,7 @@ pub proof fn theorem_family_codec_ok(
         codec_conditions(code, d, m),
 {
     // <vc-code>
-    assume(false);
+    lemma_family_codec_ok(code, esc, literal, short, short_inv, d, m);
     // </vc-code>
 }
 
