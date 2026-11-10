@@ -1,6 +1,6 @@
 ---
 id: lib-security-property
-status: specced
+status: grilled
 owner: fritzClaw
 ---
 
@@ -73,6 +73,49 @@ gets verified encoders, decoders and theorems for free.
 
 - Decoder performance (D12).
 - How a project's own shell writes the bytes (as with vls: trusted shell, reviewed).
+
+
+## Extension 0.2.0 — token languages (SQL, shell, CSV, …)
+
+Grilled for kata 0005 (`vnotes`, a SQLite notes CLI). The line-based layer
+above stays unchanged (additive). The new layer covers languages where
+untrusted data sits *inside* a structured text: SQL statements, shell command
+lines, CSV rows. Injection means data changing the **token structure** of that
+text. The criterion is the same as the paper's: lex(unparse(ts)) = ts.
+
+### Decisions
+
+| #   | Question | Decision | Spec clause |
+|-----|----------|----------|-------------|
+| D15 | Model? | A **token language** has boundary bytes `B` (e.g. space; `,` and LF for CSV) and four token kinds. **Words**: keywords, identifiers, punctuation, from a whitelist; non-empty, no boundary bytes, never starting with a digit or a context's opening delimiter. **Boundaries**: one byte from `B`. **Numbers**: u64, rendered in decimal. **Data** in a context `k`: rendered `open(k) + encode_k(v) + close(k)`. A program builds a token sequence; `unparse` concatenates. A well-formed sequence never puts two non-boundary tokens next to each other. | `TokenLang`, `Token`, `unparse_tokens`, `wf_tokens` |
+| D16 | Data contexts? | Each context has non-empty `open`/`close` delimiters, an **alphabet** `allowed_k(b)` (bytes outside it can't be encoded; the program must reject such input), and an escape table `code_k`. | `context_*` |
+| D17 | Conditions? | Per context: codes non-empty and prefix-free; every code prefix-incomparable with `close·b` for each boundary `b` (data can't end its literal early); opening delimiters pairwise prefix-incomparable. Words never start with an opening delimiter; boundaries aren't digits. Exact list fixed in the spec. | `token_lang_conditions` |
+| D18 | Theorems? | For every language meeting the conditions: **lexical round trip** `lex(unparse(ts)) == Some(ts)` for well-formed `ts` whose data lies in its alphabets; injectivity; strictness of the exec lexer. | `theorem_tokens_*` |
+| D19 | "No injection" for an app? | `template(ts)` erases data and number payloads (keeping kinds, contexts, words, boundaries). An app proves `template(query) == T_cmd`, a constant per command. With D18, the structure of the *text* it emits is then independent of all input. | `template`, `theorem_structure_independent` |
+| D20 | Composition? | A data value may itself be the unparse of an **inner** language, e.g. a LIKE pattern inside a SQL string literal. Encoders apply innermost first. A generic theorem: the composed round trip and injectivity hold if both languages meet the conditions and the inner output lies in the outer context's alphabet. | `theorem_composed_*` |
+| D21 | Shipped instances? | **SQL (SQLite subset)**: string literal `'…'` (`'` → `''`, alphabet without NUL), quoted identifier `"…"` (`"` → `""`), numbers, keyword/punctuation words, boundary = space; plus the inner **LIKE pattern** language (wildcards `%` `_`, escape `\`). **POSIX shell words**: `'…'` with `'` → `'\''`, alphabet without NUL, boundary = space. **CSV**: quoted field `"…"` with `"` → `""`, boundaries `,` and LF. Each is proved to meet the conditions (by SMT). | instances |
+| D22 | Exec code? | Generic verified `unparse_tokens_exec`, `encode_data` (fails on bytes outside the alphabet) and a strict `lex_exec`, for any language. | contracts |
+| D23 | UTF-8? | Byte alphabets can't express UTF-8 validity. SQL text is UTF-8 because the app requires valid UTF-8 input; that's the app's precondition (kata 0005), not a library condition. | — |
+| D24 | Compatibility? | Version 0.2.0. The line-based API and its theorems are unchanged; kata 0004 is unaffected. | — |
+| D25 | Docs? | README, skill and templates extended: defining a token language, the app-level structure theorem, composition. | — |
+
+### Examples
+
+| #   | Input | Expected | Plausible wrong answer the spec must reject |
+|-----|-------|----------|---------------------------------------------|
+| E6  | SQL string `it's` | `'it''s'` | `'it's'` |
+| E7  | SQL string `'); DROP TABLE notes;--` | `'''); DROP TABLE notes;--'`, lexed back as **one** string token | several tokens / statements |
+| E8  | SQL string context with `'` encoded as itself | violates the conditions (code `'` is a prefix of close·space) | accepted |
+| E9  | shell word `it's` | `'it'\''s'` | `'it's'` |
+| E10 | CSV row `["a,b", "x\"y"]` | `"a,b","x""y"⏎` | `a,b,x"y⏎` |
+| E11 | LIKE substring `50%_off` | pattern `%50\%\_off%`, SQL literal `'%50\%\_off%'` with `ESCAPE '\'` | `'%50%_off%'` (wildcard injection) |
+| E12 | strict lexing: `'abc` (unterminated), `'a'b` (close not followed by a boundary) | `None` | accepted |
+
+### Properties
+
+- P4 Every token language meeting the conditions gets D18 without further proof.
+- P5 SQL, shell and CSV instances meet the conditions (non-vacuous).
+- P6 Composition preserves the round trip (D20).
 
 ## Open questions
 
