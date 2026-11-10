@@ -1,6 +1,6 @@
 ---
 id: 0004-vls-codec-conformance
-status: grilled
+status: specced
 owner: fritzClaw
 ---
 

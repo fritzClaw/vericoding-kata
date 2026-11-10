@@ -34,6 +34,26 @@
         "katas/0003-count-files/src/main.rs": "f5cb069a7e3b5930225333e5d89434df06f3832e6886d4feb01d340a85282438",
         "katas/0003-count-files/tests/pipeline.rs": "783da7544b6744a1392cf06a5708198cbfba10a1b804b7cbfd3473abd658346c"
       }
+    },
+    "0004-vls-codec-conformance": {
+      "intent": {
+        "path": "intents/0004-vls-codec-conformance.md",
+        "sha256": "9383d5813f93b708eaaaffb2740041c273f977c63964af08128ad3079f614a84"
+      },
+      "files": {
+        "katas/0004-vls-codec-conformance/Cargo.toml": "c065737e67fb93e3d4b40586c4424b5ba4472b37185a09801aa50931bd5f150e",
+        "katas/0004-vls-codec-conformance/src/lib.rs": "9cfc576a11423d9b5048146cbfee33af43357a0edf40f28122ead63906af9b97"
+      }
+    },
+    "lib-security-property": {
+      "intent": {
+        "path": "intents/lib-security-property.md",
+        "sha256": "0c41758426d382f33a11a8e6f6d0af2225e9bd00235b11479baede8d2c3ee491"
+      },
+      "files": {
+        "lib-security-property/Cargo.toml": "98fd7111e1e8a7d79cf13104ccd706fb11047646ed3b701348495e6c4ff7fdf0",
+        "lib-security-property/src/lib.rs": "56e67a7d689f8160261730777662733141f962f19f240c6e6f40f3c7f6843462"
+      }
     }
   }
 }

@@ -1,6 +1,6 @@
 ---
 id: lib-security-property
-status: grilled
+status: specced
 owner: fritzClaw
 ---
 
