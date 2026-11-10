@@ -837,8 +837,8 @@ proof fn lemma_split_reverse<C: Codec>(s: Seq<u8>)
 
 /// The byte whose code starts `l` (unique when codec_ok holds, by C3).
 pub open spec fn token<C: Codec>(l: Seq<u8>) -> Option<(u8, nat)> {
-    if exists|b: u8| is_prefix(C::code(b), l) {
-        let b = choose|b: u8| is_prefix(C::code(b), l);
+    if exists|b: u8| #[trigger] is_prefix(C::code(b), l) {
+        let b = choose|b: u8| #[trigger] is_prefix(C::code(b), l);
         Some((b, C::code(b).len()))
     } else {
         None
@@ -875,7 +875,7 @@ proof fn lemma_token_code<C: Codec>(b: u8, t: Seq<u8>)
     let l = C::code(b) + t;
     assert(l.subrange(0, C::code(b).len() as int) =~= C::code(b));
     assert(is_prefix(C::code(b), l));
-    let c = choose|c: u8| is_prefix(C::code(c), l);
+    let c = choose|c: u8| #[trigger] is_prefix(C::code(c), l);
     lemma_prefix_unique::<C>(b, c, l);
 }
 
@@ -1850,7 +1850,7 @@ fn prefix_at(c: &Vec<u8>, l: &Vec<u8>, i: usize) -> (r: bool)
             c.len() <= l.len() - i,
             i <= l.len(),
             rest == l@.subrange(i as int, l@.len() as int),
-            forall|j: int| 0 <= j < k ==> c@[j] == rest[j],
+            forall|j: int| 0 <= j < k ==> #[trigger] c@[j] == rest[j],
         decreases c.len() - k,
     {
         if c[k] != l[i + k] {
@@ -1891,14 +1891,14 @@ fn token_exec<C: Codec>(l: &Vec<u8>, i: usize) -> (r: Option<(u8, usize)>)
         let c = code_vec::<C>(b as u8);
         if prefix_at(&c, l, i) {
             proof {
-                let ch = choose|x: u8| is_prefix(C::code(x), rest);
+                let ch = choose|x: u8| #[trigger] is_prefix(C::code(x), rest);
                 lemma_prefix_unique::<C>(b as u8, ch, rest);
             }
             return Some((b as u8, c.len()));
         }
         b += 1;
     }
-    assert(!exists|x: u8| is_prefix(C::code(x), rest)) by {
+    assert(!exists|x: u8| #[trigger] is_prefix(C::code(x), rest)) by {
         assert forall|x: u8| !is_prefix(#[trigger] C::code(x), rest) by {
             assert((x as u16) < 256);
         }
