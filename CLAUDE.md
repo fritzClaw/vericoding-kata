@@ -44,6 +44,7 @@ proof together, and never lock a spec the human has not approved.
 scripts/install-verus.sh && eval "$(scripts/install-verus.sh --print-env)"  # toolchain
 tools/vc.py status                         # katas and their state
 tools/vc.py new 0002-binary-search         # scaffold intent + kata
+tools/vc.py new lib-line-codec             # scaffold a reusable library (same gate as katas)
 cargo verus focus -p <crate> -- --expand-errors   # fast proof iteration
 scripts/verify.sh [NNNN-name]              # the gate (same as CI)
 ```

@@ -133,7 +133,7 @@ class VcCheckTest(unittest.TestCase):
         self.assertRejected("not covered by the spec lock")
 
     def test_kata_dropped_from_workspace(self):
-        self.edit("Cargo.toml", r'members = \["katas/\*"\]', 'members = []')
+        self.edit("Cargo.toml", r'members = \["katas/\*", "lib-\*"\]', 'members = ["katas/*"]')
         self.assertRejected("workspace members")
 
     def test_vstd_pin_drift(self):
@@ -218,7 +218,33 @@ class VcCheckTest(unittest.TestCase):
 
     def test_markdown_in_src_rejected(self):
         (self.tmp / KATA / "src/notes.md").write_text("# notes\n")
-        self.assertRejected("top-level *.md")
+        self.assertRejected("*.md docs")
+
+    def test_library_goes_through_the_gate(self):
+        self.vc("new", "lib-demo")
+        self.assertTrue((self.tmp / "lib-demo/src/lib.rs").exists())
+        self.assertRejected("lib-demo: spec is not locked")
+        self.vc("lock", "lib-demo")
+        (self.tmp / "lib-demo/skill").mkdir()
+        (self.tmp / "lib-demo/skill/SKILL.md").write_text("# skill\n")
+        r = self.check()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        (self.tmp / "lib-demo/build.rs").write_text("fn main() {}\n")
+        self.assertRejected("build scripts")
+
+    def test_library_escape_hatch_scanned(self):
+        self.vc("new", "lib-demo")
+        p = self.tmp / "lib-demo/src/lib.rs"
+        p.write_text(p.read_text().replace("// <vc-helpers>\n", "// <vc-helpers>\nproof fn l() ensures false { admit(); }\n"))
+        r = subprocess.run([sys.executable, "-I", "tools/vc.py", "lock", "lib-demo"],
+                           cwd=self.tmp, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("`admit`", r.stderr)
+
+    def test_kata_markdown_in_subfolder_rejected(self):
+        (self.tmp / KATA / "docs").mkdir()
+        (self.tmp / KATA / "docs/x.md").write_text("# x\n")
+        self.assertRejected("*.md docs")
 
     def test_unlocked_test_file(self):
         (self.tmp / KATA / "tests").mkdir()

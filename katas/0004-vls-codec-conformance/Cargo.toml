@@ -1,0 +1,17 @@
+[package]
+name = "vls_conformance"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+vstd.workspace = true
+ls = { path = "../0002-ls" }
+count_files = { path = "../0003-count-files" }
+security_property = { path = "../../lib-security-property" }
+
+[package.metadata.verus]
+verify = true
+
+[lints]
+workspace = true

@@ -71,6 +71,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "security_property"
+version = "0.1.0"
+dependencies = [
+ "vstd",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -150,6 +157,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "vls_conformance"
+version = "0.1.0"
+dependencies = [
+ "count_files",
+ "ls",
+ "security_property",
+ "vstd",
 ]
 
 [[package]]

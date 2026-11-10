@@ -124,6 +124,14 @@ tools/vc.py new 0002-binary-search          # scaffolds intent + crate
 #   3. "vericode kata 0002" (vericode skill)         → scripts/verify.sh
 ```
 
+## Reusable libraries (`lib-*`)
+
+Top-level `lib-<name>/` crates hold verified code meant for reuse across
+projects (e.g. `lib-security-property`). They go through exactly the same
+pipeline and gate as katas: intent `intents/lib-<name>.md`, locked spec,
+`<vc-*>` regions, escape-hatch scan, Verus `--no-cheating`, tests. They may
+also keep `*.md` docs (guides, agent skills, templates) in subfolders.
+
 ## Layout
 
 ```
