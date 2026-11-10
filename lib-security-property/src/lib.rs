@@ -1772,6 +1772,564 @@ proof fn lemma_document_injective<C: Codec>(x: Seq<GroupS>, y: Seq<GroupS>)
     lemma_document_round_trip::<C>(y);
 }
 
+
+// ===== part 4: executable decoders and document unparser ====================
+
+proof fn lemma_codec_ok_of<C: Codec>()
+    ensures
+        codec_ok::<C>(),
+{
+    C::lemma_codec_ok();
+}
+
+fn split_exec(input: &Vec<u8>, d: u8) -> (r: (Vec<Vec<u8>>, Vec<u8>))
+    ensures
+        (SplitS { lines: seqs_view(r.0@), cur: r.1@ }) == split_run(split_init(), input@, d),
+{
+    let mut lines: Vec<Vec<u8>> = Vec::new();
+    let mut cur: Vec<u8> = Vec::new();
+    let mut i: usize = 0;
+    assert(input@.subrange(0, 0) =~= Seq::<u8>::empty());
+    assert(seqs_view(lines@) =~= Seq::<Seq<u8>>::empty());
+    assert(cur@ =~= Seq::<u8>::empty());
+    while i < input.len()
+        invariant
+            i <= input.len(),
+            (SplitS { lines: seqs_view(lines@), cur: cur@ }) == split_run(
+                split_init(),
+                input@.subrange(0, i as int),
+                d,
+            ),
+        decreases input.len() - i,
+    {
+        let ghost pre = input@.subrange(0, i as int);
+        let ghost next = input@.subrange(0, i + 1);
+        assert(next.subrange(0, i as int) =~= pre);
+        assert(next[i as int] == input@[i as int]);
+        let ghost lv = seqs_view(lines@);
+        let ghost cv = cur@;
+        let b = input[i];
+        if b == d {
+            lines.push(cur);
+            cur = Vec::new();
+            assert(seqs_view(lines@) =~= lv.push(cv));
+            assert(cur@ =~= Seq::<u8>::empty());
+        } else {
+            cur.push(b);
+        }
+        i += 1;
+    }
+    assert(input@.subrange(0, input@.len() as int) =~= input@);
+    (lines, cur)
+}
+
+fn code_vec<C: Codec>(b: u8) -> (r: Vec<u8>)
+    ensures
+        r@ == C::code(b),
+{
+    let mut r: Vec<u8> = Vec::new();
+    C::push_code(&mut r, b);
+    assert(r@ =~= C::code(b));
+    r
+}
+
+fn prefix_at(c: &Vec<u8>, l: &Vec<u8>, i: usize) -> (r: bool)
+    requires
+        i <= l.len(),
+    ensures
+        r == is_prefix(c@, l@.subrange(i as int, l@.len() as int)),
+{
+    let ghost rest = l@.subrange(i as int, l@.len() as int);
+    if c.len() > l.len() - i {
+        return false;
+    }
+    let mut k: usize = 0;
+    while k < c.len()
+        invariant
+            k <= c.len(),
+            c.len() <= l.len() - i,
+            i <= l.len(),
+            rest == l@.subrange(i as int, l@.len() as int),
+            forall|j: int| 0 <= j < k ==> c@[j] == rest[j],
+        decreases c.len() - k,
+    {
+        if c[k] != l[i + k] {
+            assert(rest[k as int] == l@[i + k]);
+            assert(rest.subrange(0, c@.len() as int)[k as int] != c@[k as int]);
+            return false;
+        }
+        k += 1;
+    }
+    assert(rest.subrange(0, c@.len() as int) =~= c@);
+    true
+}
+
+fn token_exec<C: Codec>(l: &Vec<u8>, i: usize) -> (r: Option<(u8, usize)>)
+    requires
+        i <= l.len(),
+    ensures
+        match (r, token::<C>(l@.subrange(i as int, l@.len() as int))) {
+            (Some((b, n)), Some((b2, n2))) => b == b2 && n as nat == n2,
+            (None, None) => true,
+            _ => false,
+        },
+{
+    proof {
+        lemma_codec_ok_of::<C>();
+    }
+    let ghost rest = l@.subrange(i as int, l@.len() as int);
+    let mut b: u16 = 0;
+    while b < 256
+        invariant
+            b <= 256,
+            i <= l.len(),
+            rest == l@.subrange(i as int, l@.len() as int),
+            codec_ok::<C>(),
+            forall|x: u8| (x as u16) < b ==> !is_prefix(#[trigger] C::code(x), rest),
+        decreases 256 - b,
+    {
+        let c = code_vec::<C>(b as u8);
+        if prefix_at(&c, l, i) {
+            proof {
+                let ch = choose|x: u8| is_prefix(C::code(x), rest);
+                lemma_prefix_unique::<C>(b as u8, ch, rest);
+            }
+            return Some((b as u8, c.len()));
+        }
+        b += 1;
+    }
+    assert(!exists|x: u8| is_prefix(C::code(x), rest)) by {
+        assert forall|x: u8| !is_prefix(#[trigger] C::code(x), rest) by {
+            assert((x as u16) < 256);
+        }
+    }
+    None
+}
+
+pub open spec fn prepend(out: Seq<u8>, r: Option<(Seq<u8>, bool)>) -> Option<(Seq<u8>, bool)> {
+    match r {
+        Some((v, h)) => Some((out + v, h)),
+        None => None,
+    }
+}
+
+fn dec_line_exec<C: Codec>(l: &Vec<u8>) -> (r: Option<(Vec<u8>, bool)>)
+    ensures
+        match r {
+            Some((v, h)) => dec_line::<C>(l@) == Some((v@, h)),
+            None => dec_line::<C>(l@) == None::<(Seq<u8>, bool)>,
+        },
+{
+    proof {
+        lemma_codec_ok_of::<C>();
+    }
+    let m = C::marker_exec();
+    let mut out: Vec<u8> = Vec::new();
+    let mut i: usize = 0;
+    assert(l@.subrange(0, l@.len() as int) =~= l@);
+    proof {
+        if let Some((v, h)) = dec_line::<C>(l@) {
+            assert(out@ + v =~= v);
+        }
+    }
+    loop
+        invariant
+            i <= l.len(),
+            m == C::marker(),
+            codec_ok::<C>(),
+            dec_line::<C>(l@) == prepend(out@, dec_line::<C>(l@.subrange(i as int, l@.len() as int))),
+        decreases l.len() - i,
+    {
+        let ghost t = l@.subrange(i as int, l@.len() as int);
+        if i == l.len() {
+            assert(t.len() == 0);
+            assert(out@ + Seq::<u8>::empty() =~= out@);
+            return Some((out, false));
+        }
+        assert(t[0] == l@[i as int]);
+        if l.len() - i == 1 && l[i] == m {
+            assert(out@ + Seq::<u8>::empty() =~= out@);
+            return Some((out, true));
+        }
+        match token_exec::<C>(l, i) {
+            None => {
+                return None;
+            },
+            Some((b, n)) => {
+                proof {
+                    lemma_token_shape::<C>(t);
+                    assert(t.subrange(n as int, t.len() as int) =~= l@.subrange(i + n, l@.len() as int));
+                    let rest = l@.subrange(i + n, l@.len() as int);
+                    if let Some((v, h)) = dec_line::<C>(rest) {
+                        assert(out@ + (seq![b] + v) =~= out@.push(b) + v);
+                    }
+                }
+                out.push(b);
+                i = i + n;
+            },
+        }
+    }
+}
+
+pub open spec fn opt_cat(o: Seq<Seq<u8>>, r: Option<Seq<Seq<u8>>>) -> Option<Seq<Seq<u8>>> {
+    match r {
+        Some(vs) => Some(o + vs),
+        None => None,
+    }
+}
+
+fn decode_records_impl<C: Codec>(input: &Vec<u8>) -> (r: Option<Vec<Vec<u8>>>)
+    ensures
+        match r {
+            Some(rs) => parse_records::<C>(input@) == Some(seqs_view(rs@)),
+            None => parse_records::<C>(input@) == None::<Seq<Seq<u8>>>,
+        },
+{
+    let d = C::delim_exec();
+    let (lines, cur) = split_exec(input, d);
+    if cur.len() > 0 {
+        return None;
+    }
+    let ghost lv = seqs_view(lines@);
+    assert(split_lines(input@, C::delim()) == Some(lv));
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut i: usize = 0;
+    assert(lv.subrange(0, lv.len() as int) =~= lv);
+    proof {
+        if let Some(vs) = dec_records::<C>(lv) {
+            assert(seqs_view(out@) + vs =~= vs);
+        }
+    }
+    while i < lines.len()
+        invariant
+            i <= lines.len(),
+            lv == seqs_view(lines@),
+            split_lines(input@, C::delim()) == Some(lv),
+            dec_records::<C>(lv) == opt_cat(seqs_view(out@), dec_records::<C>(lv.subrange(i as int, lv.len() as int))),
+        decreases lines.len() - i,
+    {
+        let ghost t = lv.subrange(i as int, lv.len() as int);
+        let ghost rest = lv.subrange(i + 1, lv.len() as int);
+        assert(t.subrange(1, t.len() as int) =~= rest);
+        assert(t[0] == lines@[i as int]@);
+        let res = dec_line_exec::<C>(&lines[i]);
+        match res {
+            Some((v, false)) => {
+                let ghost vv = v@;
+                let ghost before = seqs_view(out@);
+                out.push(v);
+                assert(seqs_view(out@) =~= before.push(vv));
+                proof {
+                    if let Some(vs) = dec_records::<C>(rest) {
+                        assert(before + (seq![vv] + vs) =~= before.push(vv) + vs);
+                    }
+                }
+            },
+            _ => {
+                assert(dec_records::<C>(t) == None::<Seq<Seq<u8>>>);
+                return None;
+            },
+        }
+        i += 1;
+    }
+    assert(lv.subrange(lv.len() as int, lv.len() as int) =~= Seq::<Seq<u8>>::empty());
+    assert(seqs_view(out@) + Seq::<Seq<u8>>::empty() =~= seqs_view(out@));
+    Some(out)
+}
+
+fn unparse_lines_exec<C: Codec>(lines: &Vec<Vec<u8>>) -> (r: Vec<u8>)
+    ensures
+        r@ == unparse_lines::<C>(seqs_view(lines@)),
+{
+    let ghost all = seqs_view(lines@);
+    let d = C::delim_exec();
+    let mut out: Vec<u8> = Vec::new();
+    let mut i: usize = 0;
+    assert(all.subrange(0, all.len() as int) =~= all);
+    assert(out@ + unparse_lines::<C>(all) =~= unparse_lines::<C>(all));
+    while i < lines.len()
+        invariant
+            i <= lines.len(),
+            all == seqs_view(lines@),
+            d == C::delim(),
+            out@ + unparse_lines::<C>(all.subrange(i as int, all.len() as int)) == unparse_lines::<C>(all),
+        decreases lines.len() - i,
+    {
+        let ghost t = all.subrange(i as int, all.len() as int);
+        let ghost rest = all.subrange(i + 1, all.len() as int);
+        assert(t.subrange(1, t.len() as int) =~= rest);
+        assert(t[0] == lines@[i as int]@);
+        let ghost before = out@;
+        let line = &lines[i];
+        let mut k: usize = 0;
+        while k < line.len()
+            invariant
+                k <= line.len(),
+                out@ == before + line@.subrange(0, k as int),
+            decreases line.len() - k,
+        {
+            out.push(line[k]);
+            assert(before + line@.subrange(0, k + 1) =~= (before + line@.subrange(0, k as int)).push(line@[k as int]));
+            k += 1;
+        }
+        assert(line@.subrange(0, line@.len() as int) =~= line@);
+        out.push(d);
+        assert(out@ + unparse_lines::<C>(rest) =~= before + unparse_lines::<C>(t));
+        i += 1;
+    }
+    assert(all.subrange(all.len() as int, all.len() as int) =~= Seq::<Seq<u8>>::empty());
+    assert(unparse_lines::<C>(Seq::<Seq<u8>>::empty()) == Seq::<u8>::empty());
+    assert(out@ + Seq::<u8>::empty() =~= out@);
+    out
+}
+
+fn encode_line<C: Codec>(s: &Vec<u8>) -> (r: Vec<u8>)
+    ensures
+        r@ == encode::<C>(s@),
+{
+    let mut r: Vec<u8> = Vec::new();
+    encode_into::<C>(&mut r, s);
+    assert(r@ =~= encode::<C>(s@));
+    r
+}
+
+fn group_lines_exec<C: Codec>(g: &Group) -> (r: Vec<Vec<u8>>)
+    ensures
+        seqs_view(r@) == group_lines::<C>(g@),
+{
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let ghost gv = g@;
+    match &g.header {
+        Some(h) => {
+            let mut hl = encode_line::<C>(h);
+            hl.push(C::marker_exec());
+            assert(hl@ =~= encode::<C>(h@) + seq![C::marker()]);
+            out.push(hl);
+            assert(seqs_view(out@) =~= seq![encode::<C>(h@) + seq![C::marker()]]);
+        },
+        None => {
+            assert(seqs_view(out@) =~= Seq::<Seq<u8>>::empty());
+        },
+    }
+    let ghost head = seqs_view(out@);
+    let ghost names = seqs_view(g.names@);
+    proof {
+        lemma_encode_all_index::<C>(names);
+    }
+    let mut i: usize = 0;
+    while i < g.names.len()
+        invariant
+            i <= g.names.len(),
+            names == seqs_view(g.names@),
+            encode_all::<C>(names).len() == names.len(),
+            forall|k: int| 0 <= k < names.len() ==> #[trigger] encode_all::<C>(names)[k] == encode::<C>(names[k]),
+            seqs_view(out@) == head + encode_all::<C>(names).subrange(0, i as int),
+        decreases g.names.len() - i,
+    {
+        let ghost before = seqs_view(out@);
+        out.push(encode_line::<C>(&g.names[i]));
+        assert(encode_all::<C>(names).subrange(0, i + 1) =~= encode_all::<C>(names).subrange(0, i as int).push(
+            encode::<C>(names[i as int]),
+        ));
+        assert(seqs_view(out@) =~= before.push(encode::<C>(names[i as int])));
+        i += 1;
+    }
+    assert(encode_all::<C>(names).subrange(0, names.len() as int) =~= encode_all::<C>(names));
+    out
+}
+
+fn unparse_document_impl<C: Codec>(doc: &Vec<Group>) -> (r: Vec<u8>)
+    ensures
+        r@ == unparse_document::<C>(doc_view(doc@)),
+{
+    proof {
+        lemma_codec_ok_of::<C>();
+    }
+    let ghost dv = doc_view(doc@);
+    let mut lines: Vec<Vec<u8>> = Vec::new();
+    let mut k: usize = 0;
+    assert(dv.subrange(0, 0) =~= Seq::<GroupS>::empty());
+    assert(groups_lines::<C>(Seq::<GroupS>::empty()) == Seq::<Seq<Seq<u8>>>::empty());
+    assert(seqs_view(lines@) =~= join_groups(Seq::<Seq<Seq<u8>>>::empty()));
+    while k < doc.len()
+        invariant
+            k <= doc.len(),
+            dv == doc_view(doc@),
+            codec_ok::<C>(),
+            seqs_view(lines@) == join_groups(groups_lines::<C>(dv.subrange(0, k as int))),
+        decreases doc.len() - k,
+    {
+        let ghost done = groups_lines::<C>(dv.subrange(0, k as int));
+        let g = group_lines_exec::<C>(&doc[k]);
+        let ghost gv = seqs_view(g@);
+        proof {
+            assert(dv.subrange(0, k + 1) =~= dv.subrange(0, k as int).push(doc@[k as int]@));
+            lemma_groups_lines_push::<C>(dv.subrange(0, k as int), doc@[k as int]@);
+            lemma_groups_lines_len::<C>(dv.subrange(0, k as int));
+            lemma_join_push::<C>(done, gv);
+        }
+        let ghost before = seqs_view(lines@);
+        if k > 0 {
+            lines.push(Vec::new());
+        }
+        let mut j: usize = 0;
+        let ghost mid = seqs_view(lines@);
+        while j < g.len()
+            invariant
+                j <= g.len(),
+                gv == seqs_view(g@),
+                seqs_view(lines@) == mid + gv.subrange(0, j as int),
+            decreases g.len() - j,
+        {
+            let ghost b2 = seqs_view(lines@);
+            let mut line: Vec<u8> = Vec::new();
+            let src = &g[j];
+            let mut q: usize = 0;
+            while q < src.len()
+                invariant
+                    q <= src.len(),
+                    line@ == src@.subrange(0, q as int),
+                decreases src.len() - q,
+            {
+                line.push(src[q]);
+                assert(src@.subrange(0, q + 1) =~= src@.subrange(0, q as int).push(src@[q as int]));
+                q += 1;
+            }
+            assert(src@.subrange(0, src@.len() as int) =~= src@);
+            lines.push(line);
+            assert(gv.subrange(0, j + 1) =~= gv.subrange(0, j as int).push(gv[j as int]));
+            assert(seqs_view(lines@) =~= b2.push(gv[j as int]));
+            j += 1;
+        }
+        assert(gv.subrange(0, gv.len() as int) =~= gv);
+        if k > 0 {
+            assert(mid =~= before + seq![Seq::<u8>::empty()]);
+            assert(seqs_view(lines@) =~= before + seq![Seq::<u8>::empty()] + gv);
+        } else {
+            assert(done == Seq::<Seq<Seq<u8>>>::empty());
+            assert(before =~= Seq::<Seq<u8>>::empty());
+            assert(seqs_view(lines@) =~= gv);
+        }
+        k += 1;
+    }
+    assert(dv.subrange(0, dv.len() as int) =~= dv);
+    unparse_lines_exec::<C>(&lines)
+}
+
+pub open spec fn pview(ok: bool, doc: Seq<Group>, fresh: bool) -> PState {
+    PState { ok, doc: doc_view(doc), fresh }
+}
+
+fn decode_document_impl<C: Codec>(input: &Vec<u8>) -> (r: Option<Vec<Group>>)
+    ensures
+        match r {
+            Some(d) => parse_document::<C>(input@) == Some(doc_view(d@)),
+            None => parse_document::<C>(input@) == None::<Seq<GroupS>>,
+        },
+{
+    let dl = C::delim_exec();
+    let (lines, cur) = split_exec(input, dl);
+    if cur.len() > 0 {
+        return None;
+    }
+    let ghost lv = seqs_view(lines@);
+    assert(split_lines(input@, C::delim()) == Some(lv));
+    let mut ok = true;
+    let mut doc: Vec<Group> = Vec::new();
+    let mut fresh = true;
+    let mut i: usize = 0;
+    assert(lv.subrange(0, 0) =~= Seq::<Seq<u8>>::empty());
+    assert(doc_view(doc@) =~= Seq::<GroupS>::empty());
+    while i < lines.len()
+        invariant
+            i <= lines.len(),
+            lv == seqs_view(lines@),
+            pview(ok, doc@, fresh) == prun::<C>(pinit(), lv.subrange(0, i as int)),
+            !fresh ==> doc.len() > 0,
+        decreases lines.len() - i,
+    {
+        let ghost pre = lv.subrange(0, i as int);
+        assert(lv.subrange(0, i + 1).subrange(0, i as int) =~= pre);
+        assert(lv.subrange(0, i + 1)[i as int] == lines@[i as int]@);
+        let ghost dv = doc_view(doc@);
+        let line = &lines[i];
+        if ok {
+            if line.len() == 0 {
+                if fresh {
+                    ok = false;
+                    doc = Vec::new();
+                    assert(doc_view(doc@) =~= Seq::<GroupS>::empty());
+                } else {
+                    fresh = true;
+                }
+            } else {
+                match dec_line_exec::<C>(line) {
+                    None => {
+                        ok = false;
+                        doc = Vec::new();
+                        fresh = true;
+                        assert(doc_view(doc@) =~= Seq::<GroupS>::empty());
+                    },
+                    Some((v, h)) => {
+                        let ghost vv = v@;
+                        if h {
+                            if fresh {
+                                let g = Group { header: Some(v), names: Vec::new() };
+                                assert(seqs_view(g.names@) =~= Seq::<Seq<u8>>::empty());
+                                let ghost gv = g@;
+                                doc.push(g);
+                                fresh = false;
+                                assert(doc_view(doc@) =~= dv.push(gv));
+                            } else {
+                                ok = false;
+                                doc = Vec::new();
+                                fresh = true;
+                                assert(doc_view(doc@) =~= Seq::<GroupS>::empty());
+                            }
+                        } else if fresh {
+                            if doc.len() == 0 {
+                                let mut names: Vec<Vec<u8>> = Vec::new();
+                                names.push(v);
+                                assert(seqs_view(names@) =~= seq![vv]);
+                                let g = Group { header: None, names };
+                                let ghost gv = g@;
+                                doc.push(g);
+                                fresh = false;
+                                assert(doc_view(doc@) =~= seq![gv]);
+                            } else {
+                                ok = false;
+                                doc = Vec::new();
+                                fresh = true;
+                                assert(doc_view(doc@) =~= Seq::<GroupS>::empty());
+                            }
+                        } else {
+                            let ghost d0 = doc@;
+                            match doc.pop() {
+                                Some(g) => {
+                                    let ghost g0 = g@;
+                                    let mut g = g;
+                                    g.names.push(v);
+                                    assert(seqs_view(g.names@) =~= g0.names.push(vv));
+                                    doc.push(g);
+                                    assert(doc@ =~= d0.update(d0.len() - 1, doc@[d0.len() - 1]));
+                                    assert(doc_view(doc@) =~= add_name(dv, vv));
+                                },
+                                None => {},
+                            }
+                        }
+                    },
+                }
+            }
+        }
+        i += 1;
+    }
+    assert(lv.subrange(0, lv.len() as int) =~= lv);
+    if ok && !(fresh && doc.len() > 0) {
+        Some(doc)
+    } else {
+        None
+    }
+}
 // </vc-helpers>
 
 // ===========================================================================
@@ -1899,8 +2457,24 @@ pub fn decode_records<C: Codec>(input: &Vec<u8>) -> (r: Option<Vec<Vec<u8>>>)
         },
 {
     // <vc-code>
-    assume(false);
-    unreached()
+    let r = decode_records_impl::<C>(input);
+    proof {
+        lemma_codec_ok_of::<C>();
+        match &r {
+            Some(rs) => {
+                lemma_records_reverse::<C>(input@);
+                assert forall|x: Seq<Seq<u8>>| #[trigger] unparse_records::<C>(x) == input@ implies x == seqs_view(rs@) by {
+                    lemma_records_round_trip::<C>(x);
+                }
+            },
+            None => {
+                assert forall|x: Seq<Seq<u8>>| #[trigger] unparse_records::<C>(x) != input@ by {
+                    lemma_records_round_trip::<C>(x);
+                }
+            },
+        }
+    }
+    r
     // </vc-code>
 }
 
@@ -1909,8 +2483,7 @@ pub fn unparse_document_exec<C: Codec>(doc: &Vec<Group>) -> (r: Vec<u8>)
         r@ == unparse_document::<C>(doc_view(doc@)),
 {
     // <vc-code>
-    assume(false);
-    unreached()
+    unparse_document_impl::<C>(doc)
     // </vc-code>
 }
 
@@ -1929,8 +2502,25 @@ pub fn decode_document<C: Codec>(input: &Vec<u8>) -> (r: Option<Vec<Group>>)
         },
 {
     // <vc-code>
-    assume(false);
-    unreached()
+    let r = decode_document_impl::<C>(input);
+    proof {
+        lemma_codec_ok_of::<C>();
+        match &r {
+            Some(d) => {
+                lemma_document_reverse::<C>(input@);
+                assert forall|x: Seq<GroupS>| wf_document(x) && #[trigger] unparse_document::<C>(x) == input@ implies x
+                    == doc_view(d@) by {
+                    lemma_document_round_trip::<C>(x);
+                }
+            },
+            None => {
+                assert forall|x: Seq<GroupS>| wf_document(x) implies #[trigger] unparse_document::<C>(x) != input@ by {
+                    lemma_document_round_trip::<C>(x);
+                }
+            },
+        }
+    }
+    r
     // </vc-code>
 }
 
