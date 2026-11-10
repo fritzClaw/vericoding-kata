@@ -10,6 +10,8 @@
 //!     IEEE SPW 2015), injectivity, and a strict decoder.
 //! `EscapeFamily` builds C-style tables whose conditions follow from a few
 //! per-byte facts; `BackslashEscape` (vls's table) is a ready instance.
+//! 0.2.0: token languages (`TokenLang`): untrusted data inside SQL, shell or
+//! CSV text, with lex(unparse(ts)) = ts and verified SQL/shell/CSV instances.
 //!
 //! Everything OUTSIDE the `<vc-helpers>` / `<vc-code>` regions is the frozen,
 //! human-approved specification (hashed in specs.lock.json).
@@ -2630,6 +2632,727 @@ pub proof fn theorem_family_codec_ok(
 }
 
 // ===========================================================================
+// Token languages (0.2.0, D15–D25): SQL, shell, CSV, …
+// ===========================================================================
+
+/// D15: a token of a token language (spec view).
+pub enum TokenS {
+    /// keyword, identifier or punctuation from the language's whitelist
+    Word(Seq<u8>),
+    /// one boundary byte (e.g. a space)
+    Boundary(u8),
+    /// a number, rendered in decimal
+    Num(u64),
+    /// untrusted data in context `k`
+    Data(u8, Seq<u8>),
+}
+
+/// The parameters of a token language, as plain spec functions.
+pub struct LangS {
+    pub boundary: spec_fn(u8) -> bool,
+    pub word: spec_fn(Seq<u8>) -> bool,
+    pub ctx: spec_fn(u8) -> bool,
+    pub open: spec_fn(u8) -> Seq<u8>,
+    pub close: spec_fn(u8) -> Seq<u8>,
+    pub allowed: spec_fn(u8, u8) -> bool,
+    pub code: spec_fn(u8, u8) -> Seq<u8>,
+}
+
+pub open spec fn is_digit(b: u8) -> bool {
+    48 <= b && b <= 57
+}
+
+/// D17: the conditions a token language must meet.
+pub open spec fn token_lang_conditions(g: LangS) -> bool {
+    // boundaries are never digits
+    &&& forall|b: u8| #[trigger] (g.boundary)(b) ==> !is_digit(b)
+    // contexts: delimiters non-empty; an opening delimiter never starts with a digit or a boundary
+    &&& forall|k: u8|
+        #[trigger] (g.ctx)(k) ==> (g.open)(k).len() > 0 && (g.close)(k).len() > 0 && !is_digit((g.open)(k)[0])
+            && !(g.boundary)((g.open)(k)[0])
+    // opening delimiters of different contexts are prefix-incomparable
+    &&& forall|k: u8, j: u8|
+        (#[trigger] (g.ctx)(k)) && (#[trigger] (g.ctx)(j)) && k != j ==> !is_prefix((g.open)(k), (g.open)(j))
+    // codes of allowed bytes: non-empty
+    &&& forall|k: u8, b: u8| (g.ctx)(k) && #[trigger] (g.allowed)(k, b) ==> ((g.code)(k, b)).len() > 0
+    // codes of allowed bytes: prefix-free
+    &&& forall|k: u8, b: u8, c: u8|
+        (g.ctx)(k) && (#[trigger] (g.allowed)(k, b)) && (#[trigger] (g.allowed)(k, c)) && b != c ==> !is_prefix(
+            (g.code)(k, b),
+            (g.code)(k, c),
+        )
+    // data can't end its literal early: no code is prefix-comparable with close + boundary
+    &&& forall|k: u8, b: u8, s: u8|
+        (g.ctx)(k) && (#[trigger] (g.allowed)(k, b)) && (#[trigger] (g.boundary)(s)) ==> !is_prefix(
+            (g.code)(k, b),
+            (g.close)(k) + seq![s],
+        ) && !is_prefix((g.close)(k) + seq![s], (g.code)(k, b))
+    // ... nor be a prefix of the bare closing delimiter (end of text)
+    &&& forall|k: u8, b: u8| (g.ctx)(k) && #[trigger] (g.allowed)(k, b) ==> !is_prefix((g.code)(k, b), (g.close)(k))
+    // words: non-empty, no boundary bytes, not starting with a digit or an opening delimiter
+    &&& forall|w: Seq<u8>|
+        #[trigger] (g.word)(w) ==> w.len() > 0 && !is_digit(w[0]) && (forall|i: int|
+            0 <= i < w.len() ==> !(g.boundary)(#[trigger] w[i])) && (forall|k: u8|
+            #[trigger] (g.ctx)(k) ==> !is_prefix((g.open)(k), w))
+}
+
+pub trait TokenLang: Sized {
+    spec fn is_boundary(b: u8) -> bool;
+
+    spec fn is_word(w: Seq<u8>) -> bool;
+
+    spec fn has_context(k: u8) -> bool;
+
+    spec fn open(k: u8) -> Seq<u8>;
+
+    spec fn close(k: u8) -> Seq<u8>;
+
+    spec fn allowed(k: u8, b: u8) -> bool;
+
+    spec fn code(k: u8, b: u8) -> Seq<u8>;
+
+    fn is_boundary_exec(b: u8) -> (r: bool)
+        ensures
+            r == Self::is_boundary(b),
+    ;
+
+    fn is_word_exec(w: &Vec<u8>) -> (r: bool)
+        ensures
+            r == Self::is_word(w@),
+    ;
+
+    fn has_context_exec(k: u8) -> (r: bool)
+        ensures
+            r == Self::has_context(k),
+    ;
+
+    fn open_exec(k: u8) -> (r: Vec<u8>)
+        ensures
+            r@ == Self::open(k),
+    ;
+
+    fn close_exec(k: u8) -> (r: Vec<u8>)
+        ensures
+            r@ == Self::close(k),
+    ;
+
+    fn allowed_exec(k: u8, b: u8) -> (r: bool)
+        ensures
+            r == Self::allowed(k, b),
+    ;
+
+    fn push_code(k: u8, out: &mut Vec<u8>, b: u8)
+        ensures
+            final(out)@ == old(out)@ + Self::code(k, b),
+    ;
+
+    /// Discharge D17 (this is `lang_ok::<Self>()`).
+    proof fn lemma_lang_ok()
+        ensures
+            token_lang_conditions(
+                LangS {
+                    boundary: |b: u8| Self::is_boundary(b),
+                    word: |w: Seq<u8>| Self::is_word(w),
+                    ctx: |k: u8| Self::has_context(k),
+                    open: |k: u8| Self::open(k),
+                    close: |k: u8| Self::close(k),
+                    allowed: |k: u8, b: u8| Self::allowed(k, b),
+                    code: |k: u8, b: u8| Self::code(k, b),
+                },
+            ),
+    ;
+}
+
+pub open spec fn lang_of<L: TokenLang>() -> LangS {
+    LangS {
+        boundary: |b: u8| L::is_boundary(b),
+        word: |w: Seq<u8>| L::is_word(w),
+        ctx: |k: u8| L::has_context(k),
+        open: |k: u8| L::open(k),
+        close: |k: u8| L::close(k),
+        allowed: |k: u8, b: u8| L::allowed(k, b),
+        code: |k: u8, b: u8| L::code(k, b),
+    }
+}
+
+pub open spec fn lang_ok<L: TokenLang>() -> bool {
+    token_lang_conditions(lang_of::<L>())
+}
+
+/// Decimal digits of `n` (no leading zeros; `0` is "0").
+pub open spec fn decimal(n: u64) -> Seq<u8>
+    decreases n,
+{
+    if n < 10 {
+        seq![(48 + n) as u8]
+    } else {
+        decimal(n / 10) + seq![(48 + n % 10) as u8]
+    }
+}
+
+/// Encode the data `v` of context `k` byte by byte.
+pub open spec fn encode_ctx(g: LangS, k: u8, v: Seq<u8>) -> Seq<u8>
+    decreases v.len(),
+{
+    if v.len() == 0 {
+        seq![]
+    } else {
+        (g.code)(k, v[0]) + encode_ctx(g, k, v.subrange(1, v.len() as int))
+    }
+}
+
+pub open spec fn render(g: LangS, t: TokenS) -> Seq<u8> {
+    match t {
+        TokenS::Word(w) => w,
+        TokenS::Boundary(b) => seq![b],
+        TokenS::Num(n) => decimal(n),
+        TokenS::Data(k, v) => (g.open)(k) + encode_ctx(g, k, v) + (g.close)(k),
+    }
+}
+
+/// The unparser of a token language: render every token, concatenate.
+pub open spec fn unparse_tokens(g: LangS, ts: Seq<TokenS>) -> Seq<u8>
+    decreases ts.len(),
+{
+    if ts.len() == 0 {
+        seq![]
+    } else {
+        render(g, ts[0]) + unparse_tokens(g, ts.subrange(1, ts.len() as int))
+    }
+}
+
+pub open spec fn in_alphabet(g: LangS, k: u8, v: Seq<u8>) -> bool {
+    forall|i: int| 0 <= i < v.len() ==> (g.allowed)(k, #[trigger] v[i])
+}
+
+pub open spec fn is_boundary_token(t: TokenS) -> bool {
+    match t {
+        TokenS::Boundary(_) => true,
+        _ => false,
+    }
+}
+
+pub open spec fn token_ok(g: LangS, t: TokenS) -> bool {
+    match t {
+        TokenS::Word(w) => (g.word)(w),
+        TokenS::Boundary(b) => (g.boundary)(b),
+        TokenS::Num(_) => true,
+        TokenS::Data(k, v) => (g.ctx)(k) && in_alphabet(g, k, v),
+    }
+}
+
+/// D15: valid tokens, and never two non-boundary tokens side by side.
+pub open spec fn wf_tokens(g: LangS, ts: Seq<TokenS>) -> bool {
+    &&& forall|i: int| 0 <= i < ts.len() ==> token_ok(g, #[trigger] ts[i])
+    &&& forall|i: int|
+        0 <= i < ts.len() - 1 ==> is_boundary_token(#[trigger] ts[i]) || is_boundary_token(ts[i + 1])
+}
+
+/// D19: the structure of a token sequence (payloads of data and numbers erased).
+pub open spec fn template_token(t: TokenS) -> TokenS {
+    match t {
+        TokenS::Num(_) => TokenS::Num(0),
+        TokenS::Data(k, _) => TokenS::Data(k, seq![]),
+        _ => t,
+    }
+}
+
+pub open spec fn template(ts: Seq<TokenS>) -> Seq<TokenS> {
+    Seq::new(ts.len(), |i: int| template_token(ts[i]))
+}
+
+// ---- executable tokens ----
+
+pub enum Token {
+    Word(Vec<u8>),
+    Boundary(u8),
+    Num(u64),
+    Data(u8, Vec<u8>),
+}
+
+impl View for Token {
+    type V = TokenS;
+
+    open spec fn view(&self) -> TokenS {
+        match self {
+            Token::Word(w) => TokenS::Word(w@),
+            Token::Boundary(b) => TokenS::Boundary(*b),
+            Token::Num(n) => TokenS::Num(*n),
+            Token::Data(k, v) => TokenS::Data(*k, v@),
+        }
+    }
+}
+
+pub open spec fn tokens_view(ts: Seq<Token>) -> Seq<TokenS> {
+    Seq::new(ts.len(), |i: int| ts[i]@)
+}
+
+// ---- D20: the LIKE pattern language (inner language of a SQL string) ----
+
+/// Escape `%`, `_` and `\` with `\` (SQL `LIKE … ESCAPE '\'`).
+pub open spec fn like_escape(s: Seq<u8>) -> Seq<u8>
+    decreases s.len(),
+{
+    if s.len() == 0 {
+        seq![]
+    } else {
+        (if s[0] == 37 || s[0] == 95 || s[0] == 92 {
+            seq![92u8, s[0]]
+        } else {
+            seq![s[0]]
+        }) + like_escape(s.subrange(1, s.len() as int))
+    }
+}
+
+/// A substring pattern: `%` + escaped text + `%`.
+pub open spec fn like_substring(s: Seq<u8>) -> Seq<u8> {
+    seq![37u8] + like_escape(s) + seq![37u8]
+}
+
+// ---- D21: shipped instances ----
+
+/// SQL (SQLite subset). Contexts: 0 = string literal `'…'` (`'` -> `''`),
+/// 1 = quoted identifier `"…"` (`"` -> `""`); NUL is outside both alphabets.
+/// Boundary: space. Words: identifiers/keywords `[A-Za-z_][A-Za-z0-9_]*` and
+/// the punctuation `( ) , = * ; . < > + -` and `||`.
+pub struct SqlLang;
+
+pub open spec fn is_alpha_(b: u8) -> bool {
+    (65 <= b && b <= 90) || (97 <= b && b <= 122) || b == 95
+}
+
+pub open spec fn sql_punct(w: Seq<u8>) -> bool {
+    (w.len() == 1 && (w[0] == 40 || w[0] == 41 || w[0] == 44 || w[0] == 61 || w[0] == 42 || w[0] == 59
+        || w[0] == 46 || w[0] == 60 || w[0] == 62 || w[0] == 43 || w[0] == 45)) || w == seq![124u8, 124u8]
+}
+
+pub open spec fn sql_ident(w: Seq<u8>) -> bool {
+    w.len() > 0 && is_alpha_(w[0]) && forall|i: int| 1 <= i < w.len() ==> is_alpha_(#[trigger] w[i]) || is_digit(w[i])
+}
+
+/// POSIX shell words. Context 0 = single-quoted `'…'` (`'` -> `'\''`), NUL
+/// excluded. Boundary: space. Words: `[A-Za-z_./=:+-][A-Za-z0-9_./=:+-]*`.
+pub struct ShellLang;
+
+pub open spec fn shell_word_byte(b: u8) -> bool {
+    is_alpha_(b) || is_digit(b) || b == 46 || b == 47 || b == 61 || b == 58 || b == 43 || b == 45
+}
+
+/// CSV (RFC 4180 quoting). Context 0 = quoted field `"…"` (`"` -> `""`),
+/// every byte allowed. Boundaries: `,` and LF. No bare words.
+pub struct CsvLang;
+
+impl TokenLang for SqlLang {
+    open spec fn is_boundary(b: u8) -> bool {
+        b == 32
+    }
+
+    open spec fn is_word(w: Seq<u8>) -> bool {
+        sql_ident(w) || sql_punct(w)
+    }
+
+    open spec fn has_context(k: u8) -> bool {
+        k == 0 || k == 1
+    }
+
+    open spec fn open(k: u8) -> Seq<u8> {
+        if k == 0 {
+            seq![39u8]
+        } else {
+            seq![34u8]
+        }
+    }
+
+    open spec fn close(k: u8) -> Seq<u8> {
+        if k == 0 {
+            seq![39u8]
+        } else {
+            seq![34u8]
+        }
+    }
+
+    open spec fn allowed(k: u8, b: u8) -> bool {
+        b != 0
+    }
+
+    open spec fn code(k: u8, b: u8) -> Seq<u8> {
+        if k == 0 && b == 39 {
+            seq![39u8, 39u8]
+        } else if k == 1 && b == 34 {
+            seq![34u8, 34u8]
+        } else {
+            seq![b]
+        }
+    }
+
+    fn is_boundary_exec(b: u8) -> (r: bool) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    fn is_word_exec(w: &Vec<u8>) -> (r: bool) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    fn has_context_exec(k: u8) -> (r: bool) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    fn open_exec(k: u8) -> (r: Vec<u8>) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    fn close_exec(k: u8) -> (r: Vec<u8>) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    fn allowed_exec(k: u8, b: u8) -> (r: bool) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    fn push_code(k: u8, out: &mut Vec<u8>, b: u8) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    proof fn lemma_lang_ok() {
+        // <vc-code>
+        assume(false);
+        // </vc-code>
+    }
+}
+
+impl TokenLang for ShellLang {
+    open spec fn is_boundary(b: u8) -> bool {
+        b == 32
+    }
+
+    open spec fn is_word(w: Seq<u8>) -> bool {
+        w.len() > 0 && !is_digit(w[0]) && forall|i: int| 0 <= i < w.len() ==> shell_word_byte(#[trigger] w[i])
+    }
+
+    open spec fn has_context(k: u8) -> bool {
+        k == 0
+    }
+
+    open spec fn open(k: u8) -> Seq<u8> {
+        seq![39u8]
+    }
+
+    open spec fn close(k: u8) -> Seq<u8> {
+        seq![39u8]
+    }
+
+    open spec fn allowed(k: u8, b: u8) -> bool {
+        b != 0
+    }
+
+    open spec fn code(k: u8, b: u8) -> Seq<u8> {
+        if b == 39 {
+            seq![39u8, 92u8, 39u8, 39u8]
+        } else {
+            seq![b]
+        }
+    }
+
+    fn is_boundary_exec(b: u8) -> (r: bool) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    fn is_word_exec(w: &Vec<u8>) -> (r: bool) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    fn has_context_exec(k: u8) -> (r: bool) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    fn open_exec(k: u8) -> (r: Vec<u8>) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    fn close_exec(k: u8) -> (r: Vec<u8>) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    fn allowed_exec(k: u8, b: u8) -> (r: bool) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    fn push_code(k: u8, out: &mut Vec<u8>, b: u8) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    proof fn lemma_lang_ok() {
+        // <vc-code>
+        assume(false);
+        // </vc-code>
+    }
+}
+
+impl TokenLang for CsvLang {
+    open spec fn is_boundary(b: u8) -> bool {
+        b == 44 || b == 10
+    }
+
+    open spec fn is_word(w: Seq<u8>) -> bool {
+        false
+    }
+
+    open spec fn has_context(k: u8) -> bool {
+        k == 0
+    }
+
+    open spec fn open(k: u8) -> Seq<u8> {
+        seq![34u8]
+    }
+
+    open spec fn close(k: u8) -> Seq<u8> {
+        seq![34u8]
+    }
+
+    open spec fn allowed(k: u8, b: u8) -> bool {
+        true
+    }
+
+    open spec fn code(k: u8, b: u8) -> Seq<u8> {
+        if b == 34 {
+            seq![34u8, 34u8]
+        } else {
+            seq![b]
+        }
+    }
+
+    fn is_boundary_exec(b: u8) -> (r: bool) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    fn is_word_exec(w: &Vec<u8>) -> (r: bool) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    fn has_context_exec(k: u8) -> (r: bool) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    fn open_exec(k: u8) -> (r: Vec<u8>) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    fn close_exec(k: u8) -> (r: Vec<u8>) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    fn allowed_exec(k: u8, b: u8) -> (r: bool) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    fn push_code(k: u8, out: &mut Vec<u8>, b: u8) {
+        // <vc-code>
+        assume(false);
+        unreached()
+        // </vc-code>
+    }
+
+    proof fn lemma_lang_ok() {
+        // <vc-code>
+        assume(false);
+        // </vc-code>
+    }
+}
+
+// ---- D22: generic executable operations ----
+
+/// `true` iff every byte of `v` is in context `k`'s alphabet.
+pub fn in_alphabet_exec<L: TokenLang>(k: u8, v: &Vec<u8>) -> (r: bool)
+    ensures
+        r == in_alphabet(lang_of::<L>(), k, v@),
+{
+    // <vc-code>
+    assume(false);
+    unreached()
+    // </vc-code>
+}
+
+pub fn unparse_tokens_exec<L: TokenLang>(ts: &Vec<Token>) -> (r: Vec<u8>)
+    requires
+        wf_tokens(lang_of::<L>(), tokens_view(ts@)),
+    ensures
+        r@ == unparse_tokens(lang_of::<L>(), tokens_view(ts@)),
+{
+    // <vc-code>
+    assume(false);
+    unreached()
+    // </vc-code>
+}
+
+/// Strict lexer: `Some(ts)` iff `text` is the unparse of a well-formed token
+/// sequence, and then `ts` is the only one (D18).
+pub fn lex_tokens<L: TokenLang>(text: &Vec<u8>) -> (r: Option<Vec<Token>>)
+    ensures
+        match r {
+            Some(ts) => {
+                &&& wf_tokens(lang_of::<L>(), tokens_view(ts@))
+                &&& unparse_tokens(lang_of::<L>(), tokens_view(ts@)) == text@
+                &&& forall|x: Seq<TokenS>|
+                    wf_tokens(lang_of::<L>(), x) && #[trigger] unparse_tokens(lang_of::<L>(), x) == text@ ==> x
+                        == tokens_view(ts@)
+            },
+            None => forall|x: Seq<TokenS>|
+                wf_tokens(lang_of::<L>(), x) ==> #[trigger] unparse_tokens(lang_of::<L>(), x) != text@,
+        },
+{
+    // <vc-code>
+    assume(false);
+    unreached()
+    // </vc-code>
+}
+
+pub fn like_substring_exec(s: &Vec<u8>) -> (r: Vec<u8>)
+    ensures
+        r@ == like_substring(s@),
+{
+    // <vc-code>
+    assume(false);
+    unreached()
+    // </vc-code>
+}
+
+// ---- D18–D20: theorems ----
+
+/// D18: the token unparser is injective: no data can change the token
+/// sequence (lex(unparse(ts)) = ts).
+pub proof fn theorem_tokens_injective(g: LangS, x: Seq<TokenS>, y: Seq<TokenS>)
+    requires
+        token_lang_conditions(g),
+        wf_tokens(g, x),
+        wf_tokens(g, y),
+        unparse_tokens(g, x) == unparse_tokens(g, y),
+    ensures
+        x == y,
+{
+    // <vc-code>
+    assume(false);
+    // </vc-code>
+}
+
+/// D19: the text an app emits determines its template: if two inputs
+/// produce texts with different templates, the texts differ.
+pub proof fn theorem_structure_independent(g: LangS, x: Seq<TokenS>, y: Seq<TokenS>)
+    requires
+        token_lang_conditions(g),
+        wf_tokens(g, x),
+        wf_tokens(g, y),
+        template(x) != template(y),
+    ensures
+        unparse_tokens(g, x) != unparse_tokens(g, y),
+{
+    // <vc-code>
+    assume(false);
+    // </vc-code>
+}
+
+/// D20: the LIKE substring pattern is injective and keeps NUL-free text NUL-free.
+pub proof fn theorem_like_substring(a: Seq<u8>, b: Seq<u8>)
+    ensures
+        like_substring(a) == like_substring(b) ==> a == b,
+        (forall|i: int| 0 <= i < a.len() ==> a[i] != 0) ==> (forall|i: int|
+            0 <= i < like_substring(a).len() ==> #[trigger] like_substring(a)[i] != 0),
+{
+    // <vc-code>
+    assume(false);
+    // </vc-code>
+}
+
+/// D20: composition. If the data of position `i` is `inner(a)` resp.
+/// `inner(b)` for an injective `inner`, equal texts mean equal inputs.
+pub proof fn theorem_composed_injective(
+    g: LangS,
+    x: Seq<TokenS>,
+    y: Seq<TokenS>,
+    i: int,
+    k: u8,
+    inner: spec_fn(Seq<u8>) -> Seq<u8>,
+    a: Seq<u8>,
+    b: Seq<u8>,
+)
+    requires
+        token_lang_conditions(g),
+        wf_tokens(g, x),
+        wf_tokens(g, y),
+        0 <= i < x.len(),
+        x[i] == TokenS::Data(k, inner(a)),
+        i < y.len(),
+        y[i] == TokenS::Data(k, inner(b)),
+        forall|p: Seq<u8>, q: Seq<u8>| #[trigger] inner(p) == #[trigger] inner(q) ==> p == q,
+        unparse_tokens(g, x) == unparse_tokens(g, y),
+    ensures
+        a == b,
+{
+    // <vc-code>
+    assume(false);
+    // </vc-code>
+}
+
+// ===========================================================================
 // Spec tests: the intent's examples. Checked by Verus; they never run.
 // ===========================================================================
 
@@ -2672,6 +3395,68 @@ proof fn spec_e4_prefix_table_rejected() {
     }
 }
 
+
+// ---- token languages (E6–E11) ----
+
+spec fn sq(v: Seq<u8>) -> Seq<TokenS> { seq![TokenS::Data(0, v)] }
+
+/// E6: `it's` as a SQL string literal.
+proof fn spec_e6_sql_quote() {
+    assert(unparse_tokens(lang_of::<SqlLang>(), sq(seq![105u8, 116, 39, 115]))
+        =~= seq![39u8, 105, 116, 39, 39, 115, 39]) by (compute);  // 'it''s'
+}
+
+/// E7: a classic payload stays one string token.
+spec fn payload() -> Seq<u8> { seq![39u8, 41, 59, 32, 68, 82, 79, 80, 32, 84, 65, 66, 76, 69, 59, 45, 45] }  // '); DROP TABLE;--
+
+proof fn spec_e7_payload_is_one_token(x: Seq<TokenS>) {
+    assert(unparse_tokens(lang_of::<SqlLang>(), sq(payload())) =~= seq![39u8, 39, 39, 41, 59, 32, 68, 82, 79, 80,
+        32, 84, 65, 66, 76, 69, 59, 45, 45, 39]) by (compute);
+    SqlLang::lemma_lang_ok();
+    let g = lang_of::<SqlLang>();
+    if wf_tokens(g, x) && unparse_tokens(g, x) == unparse_tokens(g, sq(payload())) {
+        assert(wf_tokens(g, sq(payload()))) by {
+            assert(sq(payload())[0] == TokenS::Data(0, payload()));
+        }
+        theorem_tokens_injective(g, x, sq(payload()));
+        assert(x.len() == 1);  // reject: several tokens / statements
+    }
+}
+
+/// E8: a string context that doesn't double `'` violates the conditions.
+proof fn spec_e8_undoubled_quote_rejected() {
+    let base = lang_of::<SqlLang>();
+    let g = LangS { code: |k: u8, b: u8| seq![b], ..base };
+    assert(!token_lang_conditions(g)) by {
+        if token_lang_conditions(g) {
+            assert((g.ctx)(0u8) && (g.allowed)(0u8, 39u8) && (g.boundary)(32u8));
+            assert(!is_prefix((g.code)(0u8, 39u8), (g.close)(0u8) + seq![32u8]));
+            assert(((g.close)(0u8) + seq![32u8]).subrange(0, 1) =~= seq![39u8]);
+        }
+    }
+}
+
+/// E9: `it's` as a shell word.
+proof fn spec_e9_shell_quote() {
+    assert(unparse_tokens(lang_of::<ShellLang>(), sq(seq![105u8, 116, 39, 115]))
+        =~= seq![39u8, 105, 116, 39, 92, 39, 39, 115, 39]) by (compute);  // 'it'\''s'
+}
+
+/// E10: a CSV row.
+proof fn spec_e10_csv_row() {
+    assert(unparse_tokens(lang_of::<CsvLang>(), seq![TokenS::Data(0, seq![97u8, 44, 98]), TokenS::Boundary(44),
+        TokenS::Data(0, seq![120u8, 34, 121]), TokenS::Boundary(10)])
+        =~= seq![34u8, 97, 44, 98, 34, 44, 34, 120, 34, 34, 121, 34, 10]) by (compute);  // "a,b","x""y"<LF>
+}
+
+/// E11: LIKE substring pattern for `50%_off`.
+proof fn spec_e11_like() {
+    assert(like_substring(seq![53u8, 48, 37, 95, 111, 102, 102])
+        == seq![37u8, 53, 48, 92, 37, 92, 95, 111, 102, 102, 37]) by (compute_only);  // %50\%\_off%
+    assert(like_substring(seq![53u8, 48, 37, 95, 111, 102, 102])
+        != seq![37u8, 53, 48, 37, 95, 111, 102, 102, 37]) by (compute_only);  // reject wildcard injection
+}
+
 } // verus!
 
 // Runtime tests (cargo test) for the executable operations.
@@ -2700,6 +3485,49 @@ mod tests {
         for bad in [&b"\\q\n"[..], b"\\x41\n", b"a", b"\\xC3\n", b"\x01\n"] {
             assert_eq!(decode_records::<B>(&v(bad)), None, "accepted {:?}", String::from_utf8_lossy(bad));
         }
+    }
+
+    // ---- token languages ----
+
+    fn d(v: &[u8]) -> Token { Token::Data(0, v.to_vec()) }
+    fn w(v: &[u8]) -> Token { Token::Word(v.to_vec()) }
+    fn sp() -> Token { Token::Boundary(b' ') }
+
+    #[test]
+    fn sql_tokens_round_trip() {
+        let payload = b"'); DROP TABLE notes;--";
+        let q = vec![w(b"SELECT"), sp(), w(b"id"), sp(), w(b"FROM"), sp(), w(b"notes"), sp(), w(b"WHERE"), sp(),
+            w(b"title"), sp(), w(b"="), sp(), d(payload), sp(), w(b"AND"), sp(), w(b"id"), sp(), w(b"="), sp(), Token::Num(42)];
+        let text = unparse_tokens_exec::<SqlLang>(&q);
+        assert_eq!(text, b"SELECT id FROM notes WHERE title = '''); DROP TABLE notes;--' AND id = 42".to_vec());
+        let back = lex_tokens::<SqlLang>(&text).expect("lexes");
+        assert_eq!(back.len(), q.len());
+        assert!(matches!(&back[14], Token::Data(0, v) if v == payload));
+        assert!(!in_alphabet_exec::<SqlLang>(0, &b"a\0b".to_vec()));
+    }
+
+    #[test]
+    fn e12_strict_lexing() {
+        for bad in [&b"'abc"[..], b"'a'b", b"SELECT  id", b"007", b"x'a'", b"'a''"] {
+            assert!(lex_tokens::<SqlLang>(&bad.to_vec()).is_none(), "accepted {:?}", String::from_utf8_lossy(bad));
+        }
+    }
+
+    #[test]
+    fn shell_and_csv() {
+        let cmd = vec![w(b"echo"), sp(), d(b"it's $HOME; rm -rf /")];
+        let text = unparse_tokens_exec::<ShellLang>(&cmd);
+        assert_eq!(text, b"echo 'it'\\''s $HOME; rm -rf /'".to_vec());
+        assert_eq!(lex_tokens::<ShellLang>(&text).map(|t| t.len()), Some(3));
+        let row = vec![d(b"a,b"), Token::Boundary(b','), d(b"x\"y\nz"), Token::Boundary(b'\n')];
+        let text = unparse_tokens_exec::<CsvLang>(&row);
+        assert_eq!(text, b"\"a,b\",\"x\"\"y\nz\"\n".to_vec());
+        assert_eq!(lex_tokens::<CsvLang>(&text).map(|t| t.len()), Some(4));
+    }
+
+    #[test]
+    fn like_pattern() {
+        assert_eq!(like_substring_exec(&b"50%_off\\".to_vec()), b"%50\\%\\_off\\\\%".to_vec());
     }
 
     #[test]
