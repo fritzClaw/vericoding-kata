@@ -1576,7 +1576,7 @@ spec fn spec_e12_colon_r() -> RequestS {
 proof fn spec_e12_colon_cannot_forge_header() {
     // `vls x: d2` (x: a file, d2 empty) -> x\: | d2:
     assert(ls(spec_e12_colon_r()).stdout == seq![seq![120u8, 92, 58], seq![], header(n_d2())]) by (compute_only);
-    // reject: `x:` (identical to the output of `vls x d2` for two empty dirs)
+    // reject: `x:` (forges a header for a directory `x`; see vls-injection.md, B1)
     assert(ls(spec_e12_colon_r()).stdout != seq![header(seq![120u8]), seq![], header(n_d2())]) by (compute_only);
 }
 

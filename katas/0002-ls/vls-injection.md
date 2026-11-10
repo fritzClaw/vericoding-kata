@@ -168,7 +168,8 @@ over-counts.
 PR #4's description, kata 0002's intent row E12 and the comment in the spec
 test `spec_e12_colon_cannot_forge_header` give `vls x: d` vs `vls x d` as the
 collision. That pair is **not** byte-identical: `vls x d` sorts `d` before `x`.
-The spec test itself is still right: it checks that the old output `x:` is
-rejected for that request. Only the justification is wrong; the exact
-collision is the `a:` / `b` pair in B1. The intent and spec comment are locked
-text, so fixing them is a spec-stage change that needs approval.
+The spec test itself was always right: it checks that the old output `x:` is
+rejected for that request. Only the justification was wrong; the exact
+collision is the `a:` / `b` pair in B1. The intent row and the spec-test
+comment have since been corrected (spec stage, approved and re-locked); PR #4's
+description keeps the original wording.
