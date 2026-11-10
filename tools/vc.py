@@ -24,6 +24,7 @@ enforces that:
 
 Commands:
   vc.py new NNNN-name      scaffold intents/NNNN-name.md and katas/NNNN-name/
+  vc.py new lib-name       scaffold a reusable library lib-name/ (same gate)
   vc.py lock KATA...       (re)pin spec + intent hashes after human approval
   vc.py check              verify lock, escape hatches, toolchain pins
   vc.py status [--json|--markdown]   list katas and their state
@@ -47,7 +48,8 @@ TOOLCHAIN_ENV = ROOT / "verus-toolchain.env"
 
 REGION_OPEN = re.compile(r"^\s*//\s*<vc-(helpers|code|shell)>\s*$")
 REGION_CLOSE = re.compile(r"^\s*//\s*</vc-(helpers|code|shell)>\s*$")
-KATA_NAME = re.compile(r"^\d{4}-[a-z0-9]+(-[a-z0-9]+)*$")
+KATA_NAME = re.compile(r"^(\d{4}|lib)-[a-z0-9]+(-[a-z0-9]+)*$")  # katas/NNNN-name or top-level lib-name
+WORKSPACE_MEMBERS = ["katas/*", "lib-*"]
 # Canonical pending stubs: exec fn body, and proof fn (theorem) body.
 STUBS = ("assume(false);\nunreached()", "assume(false);")
 
@@ -216,9 +218,11 @@ class Kata:
 
 
 def all_katas() -> list[Kata]:
-    if not KATAS.exists():
-        return []
-    return [Kata(d.name, d) for d in sorted(KATAS.iterdir()) if (d / "Cargo.toml").exists()]
+    """Katas (katas/NNNN-name) and reusable libraries (top-level lib-name).
+    Libraries go through exactly the same gate as katas."""
+    dirs = sorted(KATAS.iterdir()) if KATAS.exists() else []
+    dirs += sorted(ROOT.glob("lib-*"))
+    return [Kata(d.name, d) for d in dirs if d.is_dir() and (d / "Cargo.toml").exists()]
 
 
 def find_kata(name: str) -> Kata:
@@ -226,7 +230,7 @@ def find_kata(name: str) -> Kata:
     for k in all_katas():
         if k.name == name:
             return k
-    raise VcError(f"no kata named {name!r} under katas/")
+    raise VcError(f"no kata named {name!r} under katas/ (or library lib-*)")
 
 
 def load_lock() -> dict:
@@ -272,9 +276,9 @@ def scan(src: Source) -> list[str]:
 def check_kata(k: Kata, lock: dict) -> list[str]:
     problems: list[str] = []
     if not KATA_NAME.match(k.name):
-        problems.append(f"katas/{k.name}: directory must be named NNNN-kebab-name")
+        problems.append(f"{rel(k.dir)}: directory must be named NNNN-kebab-name (or lib-kebab-name)")
     if not k.intent.exists():
-        problems.append(f"katas/{k.name}: missing intent document {rel(k.intent)}")
+        problems.append(f"{rel(k.dir)}: missing intent document {rel(k.intent)}")
 
     manifest = tomllib.loads(k.manifest.read_text())
     if manifest.get("package", {}).get("metadata", {}).get("verus", {}).get("verify") is not True:
@@ -282,12 +286,14 @@ def check_kata(k: Kata, lock: dict) -> list[str]:
 
     for f in k.files():
         parts = f.relative_to(k.dir).parts
+        is_lib = k.name.startswith("lib-")
         allowed = parts == ("Cargo.toml",) or (
             parts[0] in ("src", "tests") and f.suffix == ".rs") or (
-            len(parts) == 1 and f.suffix == ".md")  # docs: not compiled, not locked
+            f.suffix == ".md" and (len(parts) == 1 or (is_lib and parts[0] not in ("src", "tests"))))
+        # docs (*.md) are never compiled and not locked; libraries may keep them in subfolders
         if not allowed:
-            problems.append(f"{rel(f)}: only Cargo.toml, src/**/*.rs, tests/**/*.rs and top-level *.md may live "
-                            "in a kata (build scripts and other files would escape the spec lock)")
+            problems.append(f"{rel(f)}: only Cargo.toml, src/**/*.rs, tests/**/*.rs and *.md docs may live "
+                            "in a kata or library (build scripts and other files would escape the spec lock)")
     sources = k.sources()
     if not sources:
         problems.append(f"katas/{k.name}: no Rust sources")
@@ -327,8 +333,8 @@ def check_toolchain() -> list[str]:
     vstd = ws.get("workspace", {}).get("dependencies", {}).get("vstd")
     if vstd != f"={env['VSTD_VERSION']}":
         problems.append(f"Cargo.toml: workspace vstd = {vstd!r}, expected '={env['VSTD_VERSION']}'")
-    if ws.get("workspace", {}).get("members") != ["katas/*"]:
-        problems.append("Cargo.toml: workspace members must be exactly [\"katas/*\"] so no kata escapes CI")
+    if ws.get("workspace", {}).get("members") != WORKSPACE_MEMBERS:
+        problems.append(f"Cargo.toml: workspace members must be exactly {WORKSPACE_MEMBERS} so no kata or library escapes CI")
     chan = tomllib.loads((ROOT / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
     if chan != env["RUST_TOOLCHAIN"]:
         problems.append(f"rust-toolchain.toml: channel {chan!r}, expected {env['RUST_TOOLCHAIN']!r}")
@@ -452,11 +458,11 @@ verus! {{
 def cmd_new(args) -> int:
     name = args.name
     if not KATA_NAME.match(name):
-        raise VcError("kata name must look like 0002-binary-search")
-    d = KATAS / name
+        raise VcError("name must look like 0002-binary-search (kata) or lib-line-codec (library)")
+    d = (ROOT if name.startswith("lib-") else KATAS) / name
     if d.exists():
         raise VcError(f"{rel(d)} already exists")
-    crate = re.sub(r"^\d{4}-", "", name).replace("-", "_")
+    crate = re.sub(r"^(\d{4}|lib)-", "", name).replace("-", "_")
     (d / "src").mkdir(parents=True)
     (d / "Cargo.toml").write_text(KATA_TOML.format(crate=crate))
     (d / "src" / "lib.rs").write_text(KATA_LIB.format(name=name))
