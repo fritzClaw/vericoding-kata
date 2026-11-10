@@ -296,7 +296,7 @@ def check_kata(k: Kata, lock: dict) -> list[str]:
                             "in a kata or library (build scripts and other files would escape the spec lock)")
     sources = k.sources()
     if not sources:
-        problems.append(f"katas/{k.name}: no Rust sources")
+        problems.append(f"{rel(k.dir)}: no Rust sources")
     for path in sources:
         try:
             problems += scan(parse_source(path))
@@ -307,7 +307,7 @@ def check_kata(k: Kata, lock: dict) -> list[str]:
 
     entry = lock["katas"].get(k.name)
     if entry is None:
-        return [f"katas/{k.name}: spec is not locked. After the spec is approved run: tools/vc.py lock {k.name}"]
+        return [f"{rel(k.dir)}: spec is not locked. After the spec is approved run: tools/vc.py lock {k.name}"]
     current = k.fingerprint()
     if current["intent"] != entry.get("intent"):
         problems.append(f"{rel(k.intent)}: intent changed since the spec was locked; re-review the spec, then re-lock")
