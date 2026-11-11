@@ -48,11 +48,11 @@
     "lib-security-property": {
       "intent": {
         "path": "intents/lib-security-property.md",
-        "sha256": "0c41758426d382f33a11a8e6f6d0af2225e9bd00235b11479baede8d2c3ee491"
+        "sha256": "6264d2d6cf4ed929fecff44967dc8a6a9fe68800094fd2dbd0e80d5b2bc85d53"
       },
       "files": {
-        "lib-security-property/Cargo.toml": "98fd7111e1e8a7d79cf13104ccd706fb11047646ed3b701348495e6c4ff7fdf0",
-        "lib-security-property/src/lib.rs": "56e67a7d689f8160261730777662733141f962f19f240c6e6f40f3c7f6843462"
+        "lib-security-property/Cargo.toml": "c0478ef6de1d10e0036b49686da70b821b8fc3f6fc3c54c751e8d89c61fde863",
+        "lib-security-property/src/lib.rs": "6f3aaeae7bad5fb9690c4b4b6409f5fbf03c863ac5908dfb22a6f115e35c85eb"
       }
     }
   }
